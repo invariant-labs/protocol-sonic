@@ -2,13 +2,13 @@ pub mod decimals;
 mod errors;
 mod instructions;
 mod interfaces;
-mod log;
+pub mod log;
 mod macros;
-mod math;
+pub mod math;
 mod referral;
 pub mod structs;
 mod uint;
-mod util;
+pub mod util;
 
 use anchor_lang::prelude::*;
 use anchor_spl::token;
