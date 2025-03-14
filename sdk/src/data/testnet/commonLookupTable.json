@@ -1,1 +1,18 @@
-{}
+{
+  "key": "HhXMWL3q3sZ6HWh4kM9NS7vqg9RvVuAP1VqUbXFxhPsW",
+  "state": {
+    "lastExtendedSlot": 26248785,
+    "lastExtendedSlotStartIndex": 0,
+    "deactivationSlot": "18446744073709551615",
+    "authority": "7zwsfwpnrxLHA65hzWMZfRtRDva9VjDRrMFWMjp5ZtRi",
+    "addresses": [
+      "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "11111111111111111111111111111111",
+      "SysvarRent111111111111111111111111111111111",
+      "vZsuq8X635WmuZkvyQ9xRCUa39n6CxfhgbUZNWqHqmi",
+      "EKgdLHXyeFMwsPGTQE4xExz2x6zZB95RH2D3HSavszTA",
+      "8HJq6TfDVvZQJWu2RzjvV9W1yNkJNCng2iYQWCxkp7bL"
+    ]
+  }
+}
