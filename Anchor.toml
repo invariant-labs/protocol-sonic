@@ -1,0 +1,29 @@
+[registry]
+url = "https://anchor.projectserum.com"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[workspace]
+members = ["programs/invariant","programs/locker", "programs/staker"]
+# members = ["programs/invariant"]
+
+[programs.localnet]
+invariant = "8HJq6TfDVvZQJWu2RzjvV9W1yNkJNCng2iYQWCxkp7bL"
+locker = "34CS5UnQfoNmJ2MUgBc2VuM3BYFv7oYJTbEsbKrp3Zia"
+staker = "MJ6WF1tpEJ7Gk8ULqejDJapRfqBwBEp1dH5QvAgYxu9"
+
+[programs.testnet]
+invariant = "8HJq6TfDVvZQJWu2RzjvV9W1yNkJNCng2iYQWCxkp7bL"
+
+[programs.devnet]
+invariant = "8HJq6TfDVvZQJWu2RzjvV9W1yNkJNCng2iYQWCxkp7bL"
+staker = "MJ6WF1tpEJ7Gk8ULqejDJapRfqBwBEp1dH5QvAgYxu9"
+
+[programs.mainnet]
+invariant = "8HJq6TfDVvZQJWu2RzjvV9W1yNkJNCng2iYQWCxkp7bL"
+staker = "MJ6WF1tpEJ7Gk8ULqejDJapRfqBwBEp1dH5QvAgYxu9"
+
+[scripts]
+test = "ts-mocha -p ./tsconfig.json -t 1000000"

@@ -1,0 +1,94 @@
+import { Market, Pair, Network, sleep } from '@invariant-labs/sdk'
+import { FeeTier } from '@invariant-labs/sdk/lib/market'
+import { fromFee } from '@invariant-labs/sdk/lib/utils'
+import * as anchor from '@coral-xyz/anchor'
+import { AnchorProvider, BN } from '@coral-xyz/anchor'
+import { Keypair } from '@solana/web3.js'
+import { assert } from 'chai'
+import { createToken, initMarket, assertThrowsAsync } from './testUtils'
+
+describe('change-protocol-fee', () => {
+  const provider = AnchorProvider.local()
+  const connection = provider.connection
+
+  // @ts-expect-error
+  const wallet = provider.wallet.payer as Keypair
+  const mintAuthority = Keypair.generate()
+  const positionOwner = Keypair.generate()
+  const admin = Keypair.generate()
+  const feeReceiver = Keypair.generate()
+
+  const feeTier: FeeTier = {
+    fee: fromFee(new BN(600)),
+    tickSpacing: 10
+  }
+  let market: Market
+  let pair: Pair
+
+  before(async () => {
+    market = await Market.build(
+      Network.LOCAL,
+      provider.wallet,
+      connection,
+      anchor.workspace.Invariant.programId
+    )
+
+    await Promise.all([
+      connection.requestAirdrop(mintAuthority.publicKey, 1e12),
+      connection.requestAirdrop(admin.publicKey, 1e12),
+      connection.requestAirdrop(positionOwner.publicKey, 1e12),
+      connection.requestAirdrop(feeReceiver.publicKey, 1e12)
+    ])
+
+    const tokens = await Promise.all([
+      createToken(connection, wallet, mintAuthority),
+      createToken(connection, wallet, mintAuthority)
+    ])
+
+    pair = new Pair(tokens[0], tokens[1], feeTier)
+  })
+
+  it('#init()', async () => {
+    await initMarket(market, [pair], admin)
+  })
+
+  it('#change-protocol-fee() state admin', async () => {
+    const protocolFee = fromFee(new BN(11000))
+
+    const changeProtocolFeeVars = {
+      pair,
+      protocolFee,
+      admin: admin.publicKey
+    }
+    await market.changeProtocolFee(changeProtocolFeeVars, admin)
+
+    const pool = await market.getPool(pair)
+    assert.ok(pool.protocolFee.eq(new BN(110000000000)))
+  })
+
+  it('#change-protocol-fee() fee receiver', async () => {
+    const protocolFee = fromFee(new BN(11000))
+
+    const changeProtocolFeeVars = {
+      pair,
+      protocolFee,
+      admin: feeReceiver.publicKey
+    }
+    await assertThrowsAsync(market.changeProtocolFee(changeProtocolFeeVars, feeReceiver))
+  })
+
+  it('#change-protocol-fee() other account', async () => {
+    const protocolFee = fromFee(new BN(11000))
+
+    const user = Keypair.generate()
+    await connection.requestAirdrop(user.publicKey, 1e10)
+    await sleep(500)
+
+    const changeProtocolFeeVars = {
+      pair,
+      protocolFee,
+      admin: user.publicKey
+    }
+    await assertThrowsAsync(market.changeProtocolFee(changeProtocolFeeVars, user))
+  })
+})

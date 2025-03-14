@@ -1,0 +1,29 @@
+[package]
+name = "staker"
+version = "0.1.0"
+description = "Created with Anchor"
+edition = "2018"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "staker"
+doctest = false
+
+[features]
+no-entrypoint = []
+no-idl = []
+cpi = ["no-entrypoint"]
+default = ["none"]
+jupiter = []
+none = []
+all = []
+
+
+[dependencies]
+decimal = { path = "../invariant/decimal" }
+anchor-lang = "0.29.0"
+anchor-spl = "0.29.0"
+integer-sqrt = "0.1.5"
+uint = "0.9.1"
+invariant = { path = "../invariant", features = ["cpi"] }
+bytemuck = "1.19.0"

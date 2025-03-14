@@ -1,0 +1,369 @@
+import * as anchor from '@coral-xyz/anchor'
+import { AnchorProvider, BN } from '@coral-xyz/anchor'
+import { Keypair } from '@solana/web3.js'
+import { createTokensAndPool, createUserWithTokens, assertThrowsAsync } from './testUtils'
+import { Market, Network, sleep, calculatePriceSqrt, INVARIANT_ERRORS } from '@invariant-labs/sdk'
+import { getMaxTick, toDecimal } from '@invariant-labs/sdk/src/utils'
+import { CreatePosition, Swap } from '@invariant-labs/sdk/src/market'
+import { getLiquidityByX, getLiquidityByY } from '@invariant-labs/sdk/src/math'
+import { assert } from 'chai'
+import {
+  feeToTickSpacing,
+  FEE_TIERS,
+  PRICE_DENOMINATOR,
+  getBalance
+} from '@invariant-labs/sdk/lib/utils'
+import { Pair } from '@invariant-labs/sdk/lib/pair'
+
+describe('limits', () => {
+  const provider = AnchorProvider.local()
+  const connection = provider.connection
+  // @ts-expect-error
+  const wallet = provider.wallet.payer as Keypair
+  const admin = Keypair.generate()
+  const feeTier = FEE_TIERS[0]
+  let market: Market
+  let pair: Pair
+  let mintAuthority: Keypair
+  const assumedTargetPrice = new BN(PRICE_DENOMINATOR)
+
+  before(async () => {
+    market = await Market.build(
+      Network.LOCAL,
+      provider.wallet,
+      connection,
+      anchor.workspace.Invariant.programId
+    )
+    await connection.requestAirdrop(admin.publicKey, 1e10)
+    await sleep(500)
+
+    await market.createState(admin.publicKey, admin)
+  })
+
+  beforeEach(async () => {
+    const result = await createTokensAndPool(market, connection, admin, 0, feeTier)
+    pair = result.pair
+    mintAuthority = result.mintAuthority
+  })
+
+  it('big deposit both tokens', async () => {
+    const mintAmount = new BN(2).pow(new BN(63)).subn(1)
+    const { owner, userAccountX, userAccountY } = await createUserWithTokens(
+      pair,
+      connection,
+      mintAuthority,
+      mintAmount
+    )
+
+    const upperTick = pair.feeTier.tickSpacing ?? 0
+    const lowerTick = -(pair.feeTier.tickSpacing ?? 0)
+
+    const liquidityByY = getLiquidityByY(
+      mintAmount,
+      lowerTick,
+      upperTick,
+      PRICE_DENOMINATOR,
+      false
+    ).liquidity
+    const liquidityByX = getLiquidityByX(
+      mintAmount,
+      lowerTick,
+      upperTick,
+      PRICE_DENOMINATOR,
+      false
+    ).liquidity
+    // calculation of liquidity might not be exactly equal on both tokens so taking smaller one
+    const liquidityDelta = liquidityByY.lt(liquidityByX) ? liquidityByY : liquidityByX
+
+    const initPositionVars: CreatePosition = {
+      pair,
+      owner: owner.publicKey,
+      userTokenX: userAccountX,
+      userTokenY: userAccountY,
+      lowerTick,
+      upperTick,
+      liquidityDelta,
+      knownPrice: PRICE_DENOMINATOR,
+      slippage: new BN(0)
+    }
+    await market.createPosition(initPositionVars, owner)
+
+    const swapVars: Swap = {
+      pair,
+      owner: owner.publicKey,
+      xToY: true,
+      amount: new BN(1),
+      estimatedPriceAfterSwap: assumedTargetPrice, // ignore price impact using high slippage tolerance
+      slippage: toDecimal(5, 2),
+      accountX: userAccountX,
+      accountY: userAccountY,
+      byAmountIn: true
+    }
+    await assertThrowsAsync(market.swap(swapVars, owner), INVARIANT_ERRORS.NO_GAIN_SWAP)
+
+    it('big deposit X and swap Y', async () => {
+      const mintAmount = new BN(2).pow(new BN(64)).subn(1)
+      const { owner, userAccountX, userAccountY } = await createUserWithTokens(
+        pair,
+        connection,
+        mintAuthority,
+        mintAmount
+      )
+
+      const lowerTick = 0
+      const upperTick = lowerTick + (pair.feeTier.tickSpacing ?? 0)
+
+      const liquidityDelta = getLiquidityByX(
+        mintAmount,
+        lowerTick,
+        upperTick,
+        PRICE_DENOMINATOR,
+        true
+      ).liquidity
+
+      const initPositionVars: CreatePosition = {
+        pair,
+        owner: owner.publicKey,
+        userTokenX: userAccountX,
+        userTokenY: userAccountY,
+        lowerTick,
+        upperTick,
+        liquidityDelta,
+        knownPrice: PRICE_DENOMINATOR,
+        slippage: new BN(0)
+      }
+      await market.createPosition(initPositionVars, owner)
+
+      assert.ok((await getBalance(connection, userAccountX)).eqn(0))
+      assert.ok((await getBalance(connection, userAccountY)).eq(mintAmount))
+
+      const swapVars: Swap = {
+        pair,
+        owner: owner.publicKey,
+        xToY: false,
+        amount: mintAmount,
+        estimatedPriceAfterSwap: assumedTargetPrice, // ignore price impact using high slippage tolerance
+        slippage: toDecimal(5, 2),
+        accountX: userAccountX,
+        accountY: userAccountY,
+        byAmountIn: true
+      }
+      await market.swap(swapVars, owner)
+
+      assert.isFalse((await getBalance(connection, userAccountX)).eqn(0))
+      assert.ok((await getBalance(connection, userAccountY)).eqn(0))
+    })
+
+    it('big deposit Y and swap X', async () => {
+      const mintAmount = new BN(2).pow(new BN(63)).subn(1)
+      const { owner, userAccountX, userAccountY } = await createUserWithTokens(
+        pair,
+        connection,
+        mintAuthority,
+        mintAmount
+      )
+
+      const upperTick = 0
+      const lowerTick = upperTick - (pair.feeTier.tickSpacing ?? 0)
+
+      const liquidityDelta = getLiquidityByY(
+        mintAmount,
+        lowerTick,
+        upperTick,
+        PRICE_DENOMINATOR,
+        true
+      ).liquidity
+
+      const initPositionVars: CreatePosition = {
+        pair,
+        owner: owner.publicKey,
+        userTokenX: userAccountX,
+        userTokenY: userAccountY,
+        lowerTick,
+        upperTick,
+        liquidityDelta,
+        knownPrice: PRICE_DENOMINATOR,
+        slippage: new BN(0)
+      }
+      await market.createPosition(initPositionVars, owner)
+
+      assert.ok((await getBalance(connection, userAccountX)).eq(mintAmount))
+      assert.ok((await getBalance(connection, userAccountY)).eqn(0))
+
+      const swapVars: Swap = {
+        pair,
+        xToY: true,
+        amount: mintAmount,
+        estimatedPriceAfterSwap: assumedTargetPrice, // ignore price impact using high slippage tolerance
+        slippage: toDecimal(5, 2),
+        accountX: userAccountX,
+        accountY: userAccountY,
+        byAmountIn: true,
+        owner: owner.publicKey
+      }
+      await market.swap(swapVars, owner)
+
+      assert.ok((await getBalance(connection, userAccountX)).eqn(0))
+      assert.isFalse((await getBalance(connection, userAccountY)).eqn(0))
+    })
+
+    it('big deposit and swaps', async () => {
+      const mintAmount = new BN(2).pow(new BN(63).subn(1))
+      const { owner, userAccountX, userAccountY } = await createUserWithTokens(
+        pair,
+        connection,
+        mintAuthority,
+        mintAmount
+      )
+
+      const upperTick = pair.feeTier.tickSpacing ?? 0
+      const lowerTick = -(pair.feeTier.tickSpacing ?? 0)
+
+      const posAmount = mintAmount.divn(2)
+      const liquidityByY = getLiquidityByY(
+        posAmount,
+        lowerTick,
+        upperTick,
+        PRICE_DENOMINATOR,
+        false
+      ).liquidity
+      const liquidityByX = getLiquidityByY(
+        posAmount,
+        lowerTick,
+        upperTick,
+        PRICE_DENOMINATOR,
+        false
+      ).liquidity
+      // calculation of liquidity might not be exactly equal on both tokens so taking smaller one
+      const liquidityDelta = liquidityByY.lt(liquidityByX) ? liquidityByY : liquidityByX
+
+      const initPositionVars: CreatePosition = {
+        pair,
+        owner: owner.publicKey,
+        userTokenX: userAccountX,
+        userTokenY: userAccountY,
+        lowerTick,
+        upperTick,
+        liquidityDelta,
+        knownPrice: PRICE_DENOMINATOR,
+        slippage: new BN(0)
+      }
+      await market.createPosition(initPositionVars, owner)
+
+      // swap tokens
+      const amount = mintAmount.divn(8)
+
+      const swapVars: Swap = {
+        pair,
+        xToY: true,
+        amount,
+        estimatedPriceAfterSwap: assumedTargetPrice, // ignore price impact using high slippage tolerance
+        slippage: toDecimal(5, 2),
+        accountX: userAccountX,
+        accountY: userAccountY,
+        byAmountIn: true,
+        owner: owner.publicKey
+      }
+      await market.swap(swapVars, owner)
+
+      const swapVars2: Swap = {
+        pair,
+        xToY: false,
+        amount,
+        estimatedPriceAfterSwap: assumedTargetPrice, // ignore price impact using high slippage tolerance
+        slippage: toDecimal(5, 2),
+        accountX: userAccountX,
+        accountY: userAccountY,
+        byAmountIn: true,
+        owner: owner.publicKey
+      }
+      await market.swap(swapVars2, owner)
+
+      const swapVars3: Swap = {
+        pair,
+        xToY: true,
+        amount,
+        estimatedPriceAfterSwap: assumedTargetPrice, // ignore price impact using high slippage tolerance
+        slippage: toDecimal(5, 2),
+        accountX: userAccountX,
+        accountY: userAccountY,
+        byAmountIn: false,
+        owner: owner.publicKey
+      }
+      await market.swap(swapVars3, owner)
+
+      const swapVars4: Swap = {
+        pair,
+        xToY: false,
+        amount,
+        estimatedPriceAfterSwap: assumedTargetPrice, // ignore price impact using high slippage tolerance
+        slippage: toDecimal(5, 2),
+        accountX: userAccountX,
+        accountY: userAccountY,
+        byAmountIn: false,
+        owner: owner.publicKey
+      }
+      await market.swap(swapVars4, owner)
+    })
+
+    it('swap at upper limit', async () => {
+      const tickSpacing = feeToTickSpacing(feeTier.fee)
+      const initTick = getMaxTick(tickSpacing)
+
+      const result = await createTokensAndPool(market, connection, wallet, initTick, feeTier)
+      pair = result.pair
+      mintAuthority = result.mintAuthority
+
+      const poolData = await market.getPool(pair)
+      const currentSqrtPrice = poolData.sqrtPrice
+      assert.equal(poolData.currentTickIndex, initTick)
+      assert.equal(currentSqrtPrice.toString(), calculatePriceSqrt(initTick).toString())
+
+      const mintAmount = new BN(2).pow(new BN(63)).subn(1)
+
+      const positionAmount = mintAmount.subn(1)
+
+      const { owner, userAccountX, userAccountY } = await createUserWithTokens(
+        pair,
+        connection,
+        mintAuthority,
+        positionAmount
+      )
+
+      const liquidityDelta = getLiquidityByY(
+        positionAmount,
+        0,
+        Infinity,
+        poolData.sqrtPrice,
+        false,
+        pair.feeTier.tickSpacing
+      ).liquidity
+
+      const initPositionVars: CreatePosition = {
+        pair,
+        owner: owner.publicKey,
+        userTokenX: userAccountX,
+        userTokenY: userAccountY,
+        lowerTick: 0,
+        upperTick: Infinity,
+        liquidityDelta,
+        knownPrice: PRICE_DENOMINATOR,
+        slippage: new BN(0)
+      }
+      await market.createPosition(initPositionVars, owner)
+
+      const swapVars: Swap = {
+        pair,
+        xToY: false,
+        amount: new BN(1),
+        estimatedPriceAfterSwap: currentSqrtPrice, // ignore price impact using high slippage tolerance
+        slippage: toDecimal(5, 2),
+        accountX: userAccountX,
+        accountY: userAccountY,
+        byAmountIn: true,
+        owner: owner.publicKey
+      }
+      await assertThrowsAsync(market.swap(swapVars, owner))
+    })
+  })
+})
