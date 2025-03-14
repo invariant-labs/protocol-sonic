@@ -13,7 +13,7 @@ members = ["programs/invariant","programs/locker", "programs/staker", "programs/
 invariant = "8HJq6TfDVvZQJWu2RzjvV9W1yNkJNCng2iYQWCxkp7bL"
 locker = "34CS5UnQfoNmJ2MUgBc2VuM3BYFv7oYJTbEsbKrp3Zia"
 staker = "MJ6WF1tpEJ7Gk8ULqejDJapRfqBwBEp1dH5QvAgYxu9"
-invariant_autoswap = "2M7bbQFj2E2bM41FeY1Tah1tnkkWt46Bvn7fE5sZjWmK"
+invariant_autoswap = "BdexSTDwoK29CUbzi1arkAWEHG98owYY1DgeWiCpGHEh"
 
 [programs.testnet]
 invariant = "8HJq6TfDVvZQJWu2RzjvV9W1yNkJNCng2iYQWCxkp7bL"

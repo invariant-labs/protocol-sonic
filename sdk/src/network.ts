@@ -23,13 +23,13 @@ export const getMarketAddress = (network: Network) => {
 export const getInvariantAutoswapAddress = (network: Network) => {
   switch (network) {
     case Network.LOCAL:
-      return '2M7bbQFj2E2bM41FeY1Tah1tnkkWt46Bvn7fE5sZjWmK'
+      return 'BdexSTDwoK29CUbzi1arkAWEHG98owYY1DgeWiCpGHEh'
     case Network.DEV:
-      return '2M7bbQFj2E2bM41FeY1Tah1tnkkWt46Bvn7fE5sZjWmK'
+      return 'BdexSTDwoK29CUbzi1arkAWEHG98owYY1DgeWiCpGHEh'
     case Network.TEST:
-      return '2M7bbQFj2E2bM41FeY1Tah1tnkkWt46Bvn7fE5sZjWmK'
+      return 'BdexSTDwoK29CUbzi1arkAWEHG98owYY1DgeWiCpGHEh'
     case Network.MAIN:
-      return '2M7bbQFj2E2bM41FeY1Tah1tnkkWt46Bvn7fE5sZjWmK'
+      return 'BdexSTDwoK29CUbzi1arkAWEHG98owYY1DgeWiCpGHEh'
     default:
       throw new Error('Unknown network')
   }

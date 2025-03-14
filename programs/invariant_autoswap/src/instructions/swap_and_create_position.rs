@@ -21,13 +21,19 @@ const SWAP_POOLS: [&'static str; 5] = [
     "HjujFgVe4Yr7z8ge7JhokoQvuuu7e668k5d95zFsaG1S", // testnet SOL/USDC 0.09%
 ];
 
-const POSITION_POOLS: [&'static str; 6] = [
+const POSITION_POOLS: [&'static str; 12] = [
     "2KwaYnbHKtt1Z3BqxNbRzthNzggCXX1tYS89drhQfLXD", // Pool address used in tests
     "2QC7osoRf9FU55hyjBXrsCK3em5wHREGm53t264RQrpc", // Pool address used in tests
     "6efW2pggVhkWqFR6qp6ReTUWFuKQezfdpadM4gXScH6w", // Pool address used in tests
     "B4XuhBqztnfMHeDVLDwnqPuGDMTrWRzUMzAHSkBJUQg3", // Pool address used in tests
     "6sz2VkpVqCKpG4bYoBqiivqRabhaCMh1mb8nWd9GANsy", // Pool address used in tests
-    "HjujFgVe4Yr7z8ge7JhokoQvuuu7e668k5d95zFsaG1S", // testnet SOL/USDC 0.09%
+    "8dPEKB6VHB1T1WdMdriLNYAwr2rDZehw7adGzY8XZehS",
+    "Geu9kMcMLfLK9LF6845RZGFjovF7WMv83snhVcFQc9ov",
+    "Fkh82bCnJDAvb4r13QCGFp4CizebcQj9nFzNqFtPUUPF",
+    "HjujFgVe4Yr7z8ge7JhokoQvuuu7e668k5d95zFsaG1S",
+    "CsCeK4DejG1UvhVY1xeZ2kvnJCmfEsv53dyZwcjCD83Z",
+    "AhQrjgeNkiMjBBE37ND74DuhucSvvfusssGyt3R2FJfi",
+    "7T7UDwDmdG4LHccksoF3ercW3szDStcjMFGUPVggNeZJ",
 ];
 
 #[derive(Accounts)]

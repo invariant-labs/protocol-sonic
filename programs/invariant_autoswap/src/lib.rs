@@ -9,7 +9,7 @@ use anchor_lang::prelude::*;
 use errors::ErrorCode;
 use instructions::*;
 
-declare_id!("2M7bbQFj2E2bM41FeY1Tah1tnkkWt46Bvn7fE5sZjWmK");
+declare_id!("BdexSTDwoK29CUbzi1arkAWEHG98owYY1DgeWiCpGHEh");
 
 #[program]
 pub mod invariant_autoswap {
