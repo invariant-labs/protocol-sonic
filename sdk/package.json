@@ -5,7 +5,7 @@
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "scripts": {
-    "prebuild": "rm ./src/idl/* && cp -r ../target/types/invariant.ts ./src/idl && cp -r ../target/idl/invariant.json ./src/idl",
+    "prebuild": "rm ./src/idl/* && cp -r ../target/types/invariant.ts ./src/idl && cp -r ../target/idl/invariant.json ./src/idl && cp -r ../target/types/invariant_autoswap.ts ./src/idl && cp -r ../target/idl/invariant_autoswap.json ./src/idl",
     "build": "tsc"
   },
   "keywords": [],

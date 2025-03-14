@@ -20,17 +20,26 @@ export const getMarketAddress = (network: Network) => {
   }
 }
 
+export const getInvariantAutoswapAddress = (network: Network) => {
+  switch (network) {
+    case Network.LOCAL:
+      return '2M7bbQFj2E2bM41FeY1Tah1tnkkWt46Bvn7fE5sZjWmK'
+    case Network.DEV:
+      return '2M7bbQFj2E2bM41FeY1Tah1tnkkWt46Bvn7fE5sZjWmK'
+    case Network.TEST:
+      return '2M7bbQFj2E2bM41FeY1Tah1tnkkWt46Bvn7fE5sZjWmK'
+    case Network.MAIN:
+      return '2M7bbQFj2E2bM41FeY1Tah1tnkkWt46Bvn7fE5sZjWmK'
+    default:
+      throw new Error('Unknown network')
+  }
+}
+
 export const MOCK_TOKENS = {
-  USDC: '5ihkgQGjKvWvmMtywTgLdwokZ6hqFv5AgxSyYoCNufQW',
-  USDT: '4cZv7KgYNgmr3NZSDhT5bhXGGttXKTndqyXeeC1cB6Xm',
-  SOL: 'BJVjNqQzM1fywLWzzKbQEZ2Jsx9AVyhSLWzko3yF68PH',
-  MSOL: '4r8WDEvBntEr3dT69p7ua1rsaWcpTSHnKpY5JugDkcPQ',
-  WSOL: 'So11111111111111111111111111111111111111112',
-  BTC: '4gGKgUYvGkCT62Cu1zfPspuR7VPNPYrigXFmF9KTPji8',
-  REN_DOGE: 'ArjgPxuQgaGXU16XSdBPDsCit7nxjAKR5Gvtvb2oFZUZ',
-  USDH: '41dDByBv1Z6mCHCp4FJeZNP8MPiviUpFz2AdzJYRszzv',
-  HBB: 'EBuKgNDiUonDYML2CZXCRQKnE982hnt6AhaxXVZZoCyo',
-  S22: 'Bo6ufYtZ7rRtVX2VryazbYjZSgHExfpXST9Xo3Vd3CyA'
+  USDC: '2QYThuyCoSHJH6ZEbbqj1ZHc397fQ5xnHCdeEAfu8nGL',
+  SOL: '8bE8wsnfsjFvzJzQCTgPVEzVktWBVDpK1aisCvZAgPQw',
+  BTC: 'CsHREb2WNe6zcUL9TxjRQmuvB1EUF9fDuPM3Qy8SqQBs',
+  WSOL: 'So11111111111111111111111111111111111111112'
 }
 
 export const MAINNET_TOKENS = {

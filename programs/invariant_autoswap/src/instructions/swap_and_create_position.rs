@@ -1,83 +1,33 @@
 use crate::math::{get_max_liquidity, LiquidityResult};
 use crate::ErrorCode::{self, *};
 use crate::*;
-
 use anchor_spl::{token, token_2022};
+use invariant::decimals::*;
 use invariant::program::Invariant;
 use invariant::structs::pool::Pool;
 use invariant::structs::position::Position;
 use invariant::structs::position_list::PositionList;
 use invariant::structs::tick::Tick;
 use invariant::structs::Tickmap;
-// use anchor_lang::prelude::*;
-use invariant::decimals::*;
 
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 use invariant::structs::*;
 
-const SWAP_POOLS: [&'static str; 11] = [
-    "ApindooEUVcVbp2CCwZDSQ6EKVZMqfQmeHJ7wFwSkfxC", // Pool address used in tests
-    "DHNLTwn9Y3Re6TZSxxKKSWsCFpJ3gZwhvSGDUj6PP8Pk", // Pool address used in tests
-    "F9tTxkZZrWKMHGcJyxJygER6BiF4D8WHFftve4p6xxSG", // Pool address used in tests
-    "BHMc4kE8C8Yjy3kouVG19UD7uZ5Hmtbwiro1jsRMXy27", // Pool address used in tests
-    "FV4ypSZ6mTiggAPsWcrPDxR84wiuao4AGaBeMWp9piYy", // Pool address used in tests
-    "F89YjPNUfP5Q6xxnk8ZSiV3tHzCYKH7TvgLE1Mc9s7H",  // testnet btc/eth 0.01
-    "2DqmbNPisbN7nbuAdVr85rs6pR6jpvMVw8iDia2vAXp7", // testnet btc/usdc 0.01
-    "E2B7KUFwjxrsy9cC17hmadPsxWHD1NufZXTyrtuz8YxC", // SOL/USDC 0.09
-    "HRgVv1pyBLXdsAddq4ubSqo8xdQWRrYbvmXqEDtectce", // ETH/USDC 0.09
-    "86vPh8ctgeQnnn8qPADy5BkzrqoH5XjMCWvkd4tYhhmM", // SOL/ETH 0.09
-    "FvVsbwsbGVo6PVfimkkPhpcRfBrRitiV946nMNNuz7f9", // TETH/ETH 0.01
+const SWAP_POOLS: [&'static str; 5] = [
+    "2KwaYnbHKtt1Z3BqxNbRzthNzggCXX1tYS89drhQfLXD", // Pool address used in tests
+    "2QC7osoRf9FU55hyjBXrsCK3em5wHREGm53t264RQrpc", // Pool address used in tests
+    "B4XuhBqztnfMHeDVLDwnqPuGDMTrWRzUMzAHSkBJUQg3", // Pool address used in tests
+    "7JuNzpcJBrpXWvETstYEYHcMBMc5eZeMeCxkHzsxmCNZ", // Pool address used in tests
+    "HjujFgVe4Yr7z8ge7JhokoQvuuu7e668k5d95zFsaG1S", // testnet SOL/USDC 0.09%
 ];
 
-const POSITION_POOLS: [&'static str; 48] = [
+const POSITION_POOLS: [&'static str; 6] = [
+    "2KwaYnbHKtt1Z3BqxNbRzthNzggCXX1tYS89drhQfLXD", // Pool address used in tests
+    "2QC7osoRf9FU55hyjBXrsCK3em5wHREGm53t264RQrpc", // Pool address used in tests
     "6efW2pggVhkWqFR6qp6ReTUWFuKQezfdpadM4gXScH6w", // Pool address used in tests
-    "ApindooEUVcVbp2CCwZDSQ6EKVZMqfQmeHJ7wFwSkfxC", // Pool address used in tests
-    "DHNLTwn9Y3Re6TZSxxKKSWsCFpJ3gZwhvSGDUj6PP8Pk", // Pool address used in tests
-    "F9tTxkZZrWKMHGcJyxJygER6BiF4D8WHFftve4p6xxSG", // Pool address used in tests
-    "BHMc4kE8C8Yjy3kouVG19UD7uZ5Hmtbwiro1jsRMXy27", // Pool address used in tests
-    "FV4ypSZ6mTiggAPsWcrPDxR84wiuao4AGaBeMWp9piYy", // Pool address used in tests
-    "F89YjPNUfP5Q6xxnk8ZSiV3tHzCYKH7TvgLE1Mc9s7H",  // testnet btc/eth 0.01
-    "61sHhFrRDxwpVXro8iuUjVCmFwtjmvzACNzNmdQiHf1B", // testnet btc/eth 0.03
-    "EQujvjSpb14w9dsyLD6243HVcSD5SgQHkUKK5RLCGcKf", // testnet btc/eth 0.05
-    "HU6fzpfcXGEFXU6tFJD5EBs2r4F4XbhxSATkhVT9rFKZ", // testnet btc/eth 0.09
-    "DLBJyTS7rCVEZJuBY7y3D4TmZYjXDoia9hacNa7iNPXh", // testnet btc/eth 0.1
-    "9ijZd9MGku5BneX7FKNmbeMdaiYGJFiqtBzDrbxjCbrk", // testnet btc/eth 0.3
-    "8Mms3JRXUWAyPS1jqxM3iAdVi1BvYBi6BU4DDtvTTs1g", // testnet btc/eth 1
-    "2DqmbNPisbN7nbuAdVr85rs6pR6jpvMVw8iDia2vAXp7", // testnet btc/usdc 0.01
-    "DNnX3hv9H3ykh29Zjm52zaWT7iE947S7CdMuKNVH52nY", // testnet btc/usdc 0.03
-    "EmxjrerEvNSbwGneqgb2MNT27JTng4uXWcMGfTofFrgV", // testnet btc/usdc 0.05
-    "5f63BRrvoqf3TH2xvWNWtaqRo3sTbPuHjMaVspn7pDKp", // testnet btc/usdc 0.09
-    "4ecDThVdiP6wHN2Tc6etpJt8hBtp573pgPb72vWodcVr", // testnet btc/usdc 0.1
-    "3DvAH5NwZikhZpsTMbZvZVjHsf6AjfXW3H5gZAfmejyG", // testnet btc/usdc 0.3
-    "GmCRe13oLWSz7pWmqsnLxTxF8zXapWTQSRjmfbJ654XZ", // testnet btc/usdc 1
-    "DA75rd2KfPyYJY286qgwtYMfwfjTY6T53sM5Hto9FWfi", // SOL/USDC 0.01
-    "DXSJENyZAsrSTESpKGtC2YsEsBEauns47Qt46tN8p9NF", // SOL/USDC 0.02
-    "6ip62Wj6FYpe1rJm7Wo3ebPCDivWi5hjqRBYGnn8Ee7Q", // SOL/USDC 0.05
-    "E2B7KUFwjxrsy9cC17hmadPsxWHD1NufZXTyrtuz8YxC", // SOL/uSDC 0.09
-    "5N5j6yMzazQVPa9fycC2rjqHaj8f1mZJbLVS6A7CJ1iF", // SOL/USDC 0.1
-    "2YMcH9VEBXKzA4c2DHua487ZpGaZarYeRjgNBXPxHSRj", // SOL/USDC 0.3
-    "GuXMNMmmrP1MgYMCm4RcKV7R1jef5LZBjJSxX7c3YH7R", // SOL/USDC 0.1
-    "G8Skt6kgqVL9ocYn4aYVGs3gUg8EfQrTJAkA2qt3gcs8", // ETH/USDC 0.01
-    "FdEcxaJ9cDW5Y3AZ79eDtzdvK7uaxSEfn5vPb47ew5yg", // ETH/USDC 0.02
-    "3f8r3ioxkAZViSp5PcA319K9HB2ZF7aSK2CeaL6w1Lho", // ETH/USDC 0.05
-    "HRgVv1pyBLXdsAddq4ubSqo8xdQWRrYbvmXqEDtectce", // ETH/USDC 0.09
-    "8wTVWkMitZZBAgH8fAxwUc9qxVdCxZdMpw554xUKksym", // ETH/USDC 0.1
-    "JC2Uyumt8zpwAkwHawwSds8cCTL8M2ESceg4DpPApznb", // ETH/USDC 0.3
-    "5WFyCtryxTK3v7LMS1169m1Vz1xUauxJYHfRyMh8uhoH", // ETH/USDC 1
-    "6AL6jcaDUfeg3NrybF2PpmFjyKc8XPqcu8MDXAjoyjjM", // ETH/SOL 0.01
-    "FSBb5Atma2HpUhembdBT1edYw1kmVPHVqvtR1Q11jBGL", // ETH/SOL 0.02
-    "7owDutq5guBRS94XCbVy1Q1tW6nXNhHeeQPeDTQ1xTYb", // ETH/SOL 0.05
-    "86vPh8ctgeQnnn8qPADy5BkzrqoH5XjMCWvkd4tYhhmM", // ETH/SOL 0.09
-    "5nVk1wDt6TnLXiPvTDmfKzLoRbBJKuHm4pSneTPPWWS2", // ETH/SOL 0.1
-    "DSPSc9ManiurhdDBJA3XgZvc1MDibeocrKBB4MukDouE", // ETH/SOL 0.3
-    "4x7P9KXWm9QdueFFvoVY5Sd8B4YKsGUBB7xQ3iDQQQoa", // ETH/SOL 1
-    "FvVsbwsbGVo6PVfimkkPhpcRfBrRitiV946nMNNuz7f9", // ETH/TETH 0.01
-    "2MPKn48cLpMYrqJv3Yucet2LDduZQMi6FBsdqKANvg6X", // ETH/TETH 0.02
-    "9YdHK4nPkFS9f3wJ9JTmHnya55nbpRr1nBU3LHZvSBme", // ETH/TETH 0.05
-    "9za12Ea7dH51N4kdhSpaKJxekSPWXgKHavdiFG8DEVXc", // ETH/TETH 0.09
-    "4E8HzjsxvBpiMYPshihf9qUiuvL6nh833kuxzRYvQ642", // ETH/TETH 0.1
-    "ykVrPy3CWKLpfeTt7rCaRouz37kdcWqBaAcArEtGToq",  // ETH/TETH 0.3
-    "HrMrnPC6F9c9CV2ZinEgWP26pupRDNaKLuB4UXKHzBGd", // ETH/TETH 1
+    "B4XuhBqztnfMHeDVLDwnqPuGDMTrWRzUMzAHSkBJUQg3", // Pool address used in tests
+    "6sz2VkpVqCKpG4bYoBqiivqRabhaCMh1mb8nWd9GANsy", // Pool address used in tests
+    "HjujFgVe4Yr7z8ge7JhokoQvuuu7e668k5d95zFsaG1S", // testnet SOL/USDC 0.09%
 ];
 
 #[derive(Accounts)]

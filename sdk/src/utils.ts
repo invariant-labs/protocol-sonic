@@ -1,14 +1,17 @@
-import { AnchorProvider, BN, utils } from '@coral-xyz/anchor'
+import { AnchorProvider, BN, utils, web3 } from '@coral-xyz/anchor'
 import * as anchor from '@coral-xyz/anchor'
 import {
   createCloseAccountInstruction,
   createInitializeAccountInstruction,
   getAccount,
   NATIVE_MINT,
+  TOKEN_2022_PROGRAM_ID,
   TOKEN_PROGRAM_ID
 } from '@solana/spl-token'
 import { TokenInfo, TokenListContainer, TokenListProvider } from '@solana/spl-token-registry'
 import {
+  AddressLookupTableAccount,
+  AddressLookupTableProgram,
   BlockheightBasedTransactionConfirmationStrategy,
   ComputeBudgetProgram,
   ConfirmOptions,
@@ -16,6 +19,7 @@ import {
   Keypair,
   PublicKey,
   SystemProgram,
+  SYSVAR_RENT_PUBKEY,
   Transaction,
   TransactionInstruction,
   TransactionSignature
@@ -34,7 +38,8 @@ import {
   Tickmap,
   RemovePositionEvent,
   CreatePositionEvent,
-  SwapEvent
+  SwapEvent,
+  CreatePosition
 } from './market'
 import {
   calculateMinReceivedTokensByAmountIn,
@@ -43,6 +48,7 @@ import {
   calculateSwapStep,
   getLiquidityByX,
   getLiquidityByY,
+  getMaxLiquidity,
   getXfromLiquidity,
   isEnoughAmountToPushPrice,
   MIN_TICK
@@ -51,6 +57,8 @@ import { alignTickToSpacing, getTickFromPrice } from './tick'
 import { getNextTick, getPreviousTick, getSearchLimit } from './tickmap'
 import { Network } from './network'
 import { IdlEvent } from '@coral-xyz/anchor/dist/cjs/idl'
+import rawTestnetCommonLookupTable from './data/testnet/commonLookupTable.json'
+import rawTestnetPoolLookuTables from './data/testnet/poolsLookupTables.json'
 
 export const SEED = 'Invariant'
 export const DECIMAL = 12
@@ -90,6 +98,11 @@ export enum ERRORS {
   CONSTRAINT_RAW = '0x7d3',
   CONSTRAINT_SEEDS = '0x7d6',
   ACCOUNT_OWNED_BY_WRONG_PROGRAM = '0xbbf'
+}
+
+export enum INVARIANT_AUTOSWAP_ERRORS {
+  SWAP_DISABLED = '0x1776',
+  CREATE_POSITION_DISABLED = '0x1778'
 }
 
 export enum INVARIANT_ERRORS {
@@ -1520,7 +1533,597 @@ const _createNativeAtaInstructions = (
     unwrapIx
   }
 }
+export const computeTokenAmountsFromPrice = (amountX: BN, amountY: BN, swapPoolPrice: BN) => {
+  const currentPrice = swapPoolPrice.mul(swapPoolPrice)
 
+  const totalAmount = amountX.add(amountY.mul(currentPrice).div(PRICE_DENOMINATOR.pow(new BN(2))))
+
+  const x = totalAmount
+    .mul(PRICE_DENOMINATOR.pow(new BN(2)))
+    .div(currentPrice)
+    .divn(2)
+  const y = totalAmount
+    .mul(currentPrice)
+    .div(PRICE_DENOMINATOR.pow(new BN(2)))
+    .divn(2)
+
+  return { x, y }
+}
+
+export const computeTokenRatioDiff = (
+  amountX: BN,
+  amountY: BN,
+  position: Pick<CreatePosition, 'knownPrice' | 'lowerTick' | 'upperTick'>
+) => {
+  const currentRatio = getMaxLiquidity(
+    amountX,
+    amountY,
+    position.lowerTick,
+    position.upperTick,
+    position.knownPrice
+  )
+
+  const amountXDiff = amountX.sub(currentRatio.x)
+  const amountYDiff = amountY.sub(currentRatio.y)
+
+  return { x: currentRatio.x, y: currentRatio.y, amountXDiff, amountYDiff }
+}
+export const simulateSwapAndCreatePositionOnTheSamePool = (
+  amountX: BN,
+  amountY: BN,
+  slippage: BN,
+  swap: Pick<
+    SimulateSwapInterface,
+    'ticks' | 'tickmap' | 'pool' | 'maxVirtualCrosses' | 'maxCrosses'
+  >,
+  position: Pick<CreatePosition, 'lowerTick' | 'upperTick'>
+): SimulateSwapAndCreatePositionSimulation => {
+  const lowerSqrtPrice = calculatePriceSqrt(position.lowerTick)
+  const upperSqrtPrice = calculatePriceSqrt(position.upperTick)
+
+  const knownPrice = swap.pool.sqrtPrice
+
+  if (upperSqrtPrice.lt(knownPrice)) {
+    if (amountX.eqn(0)) {
+      return {
+        swapInput: undefined,
+        swapSimulation: undefined,
+        position: getMaxLiquidity(
+          new BN(0),
+          amountY,
+          position.lowerTick,
+          position.upperTick,
+          knownPrice
+        )
+      }
+    }
+
+    const sim = simulateSwap({
+      xToY: true,
+      byAmountIn: true,
+      swapAmount: amountX,
+      priceLimit: swap.pool.sqrtPrice,
+      slippage,
+      ...swap
+    })
+
+    if (upperSqrtPrice.lt(sim.priceAfterSwap)) {
+      const yAmount = sim.accumulatedAmountOut.add(amountY)
+      return {
+        swapInput: { xToY: true, byAmountIn: true, swapAmount: amountX },
+        swapSimulation: sim,
+        position: getMaxLiquidity(
+          new BN(0),
+          yAmount,
+          position.lowerTick,
+          position.upperTick,
+          sim.priceAfterSwap
+        )
+      }
+    }
+  }
+
+  if (lowerSqrtPrice.gt(knownPrice)) {
+    if (amountY.eqn(0)) {
+      return {
+        swapInput: undefined,
+        swapSimulation: undefined,
+        position: getMaxLiquidity(
+          amountX,
+          new BN(0),
+          position.lowerTick,
+          position.upperTick,
+          knownPrice
+        )
+      }
+    }
+
+    const sim = simulateSwap({
+      xToY: false,
+      byAmountIn: true,
+      swapAmount: amountY,
+      priceLimit: swap.pool.sqrtPrice,
+      slippage,
+      ...swap
+    })
+
+    if (lowerSqrtPrice.gt(sim.priceAfterSwap)) {
+      const xAmount = amountX.add(sim.accumulatedAmountOut)
+      return {
+        swapInput: { xToY: false, byAmountIn: true, swapAmount: amountY },
+        swapSimulation: sim,
+        position: getMaxLiquidity(
+          xAmount,
+          new BN(0),
+          position.lowerTick,
+          position.upperTick,
+          sim.priceAfterSwap
+        )
+      }
+    }
+  }
+
+  const { x, y, amountXDiff, amountYDiff } = computeTokenRatioDiff(amountX, amountY, {
+    ...position,
+    knownPrice
+  })
+
+  const tokenXUtilization = amountX.eqn(0) ? DENOMINATOR : x.mul(DENOMINATOR).div(amountX)
+  const tokenYUtilization = amountY.eqn(0) ? DENOMINATOR : y.mul(DENOMINATOR).div(amountY)
+
+  const lowestUtilization = tokenXUtilization.lt(tokenYUtilization)
+    ? tokenXUtilization
+    : tokenYUtilization
+
+  if (lowestUtilization.eq(DENOMINATOR)) {
+    const xAmount = x.gtn(1) ? x.subn(1) : x
+    const yAmount = y.gtn(1) ? y.subn(1) : y
+    return {
+      swapInput: undefined,
+      swapSimulation: undefined,
+      position: getMaxLiquidity(
+        xAmount,
+        yAmount,
+        position.lowerTick,
+        position.upperTick,
+        knownPrice
+      )
+    }
+  }
+
+  let xToY: boolean
+  let amount: BN
+  const byAmountIn: boolean = true
+
+  if (tokenXUtilization.gt(tokenYUtilization)) {
+    xToY = false
+    amount = amountYDiff
+  } else {
+    xToY = true
+    amount = amountXDiff
+  }
+
+  let low = new BN(0)
+  let high = amount
+  let mid = new BN(0)
+  let precision = new BN(1)
+  let bestSim: SimulationResult | undefined
+  let bestUtilization: BN | undefined
+  let bestAmountXAfterSwap: BN | undefined
+  let bestAmountYAfterSwap: BN | undefined
+  let bestAmount: BN | undefined
+
+  while (low.add(precision).lt(high)) {
+    mid = low.add(high).addn(1).divn(2)
+
+    const sim = simulateSwap({
+      xToY,
+      byAmountIn,
+      swapAmount: mid,
+      priceLimit: swap.pool.sqrtPrice,
+      slippage,
+      ...swap
+    })
+
+    switch (sim.status) {
+      case SimulationStatus.Ok:
+        break
+      case SimulationStatus.NoGainSwap:
+        low = mid
+        continue
+      default:
+        high = byAmountIn ? sim.accumulatedAmountIn : sim.accumulatedAmountOut
+        continue
+    }
+
+    let amountXAfterSwap: BN
+    let amountYAfterSwap: BN
+    if (xToY) {
+      amountXAfterSwap = amountX.sub(sim.accumulatedAmountIn).sub(sim.accumulatedFee)
+      amountYAfterSwap = amountY.add(sim.accumulatedAmountOut)
+    } else {
+      amountYAfterSwap = amountY.sub(sim.accumulatedAmountIn).sub(sim.accumulatedFee)
+      amountXAfterSwap = amountX.add(sim.accumulatedAmountOut)
+    }
+
+    const { x, y, amountXDiff, amountYDiff } = computeTokenRatioDiff(
+      amountXAfterSwap,
+      amountYAfterSwap,
+      { ...position, knownPrice: sim.priceAfterSwap }
+    )
+
+    // break early if the perfect case was found
+    if (amountXDiff.lten(0) && amountYDiff.lten(0)) {
+      const xAmount = x.gtn(1) ? x.subn(1) : x
+      const yAmount = y.gtn(1) ? y.subn(1) : y
+
+      return {
+        swapInput: {
+          xToY,
+          byAmountIn,
+          swapAmount: mid
+        },
+        swapSimulation: sim,
+        position: getMaxLiquidity(
+          xAmount,
+          yAmount,
+          position.lowerTick,
+          position.upperTick,
+          sim.priceAfterSwap
+        )
+      }
+    }
+
+    const tokenXUtilization = amountXAfterSwap.eqn(0)
+      ? DENOMINATOR
+      : x.mul(DENOMINATOR).div(amountXAfterSwap)
+    const tokenYUtilization = amountYAfterSwap.eqn(0)
+      ? DENOMINATOR
+      : y.mul(DENOMINATOR).div(amountYAfterSwap)
+
+    const lowestUtilization = tokenXUtilization.lt(tokenYUtilization)
+      ? tokenXUtilization
+      : tokenYUtilization
+
+    if (xToY) {
+      if (tokenXUtilization.lte(tokenYUtilization)) {
+        low = mid
+      } else {
+        high = mid
+      }
+    } else {
+      if (tokenYUtilization.lte(tokenXUtilization)) {
+        low = mid
+      } else {
+        high = mid
+      }
+    }
+
+    if (bestUtilization) {
+      if (lowestUtilization.gt(bestUtilization)) {
+        bestUtilization = lowestUtilization
+        bestSim = sim
+        bestAmountXAfterSwap = x
+        bestAmountYAfterSwap = y
+        bestAmount = mid
+      }
+    } else {
+      bestUtilization = lowestUtilization
+      bestSim = sim
+      bestAmountXAfterSwap = x
+      bestAmountYAfterSwap = y
+      bestAmount = mid
+    }
+  }
+
+  bestAmountXAfterSwap = bestAmountXAfterSwap
+    ? bestAmountXAfterSwap.gtn(1)
+      ? bestAmountXAfterSwap.subn(1)
+      : bestAmountXAfterSwap
+    : undefined
+  bestAmountYAfterSwap = bestAmountYAfterSwap
+    ? bestAmountYAfterSwap.gtn(1)
+      ? bestAmountYAfterSwap.subn(1)
+      : bestAmountYAfterSwap
+    : undefined
+
+  return {
+    swapInput: bestAmount
+      ? {
+          byAmountIn,
+          xToY,
+          swapAmount: bestAmount
+        }
+      : undefined,
+    swapSimulation: bestSim,
+    position:
+      bestSim && bestAmountXAfterSwap && bestAmountYAfterSwap
+        ? getMaxLiquidity(
+            bestAmountXAfterSwap,
+            bestAmountYAfterSwap,
+            position.lowerTick,
+            position.upperTick,
+            bestSim.priceAfterSwap
+          )
+        : { x: new BN(0), y: new BN(0), liquidity: new BN(0) }
+  }
+}
+
+export const simulateSwapAndCreatePosition = (
+  amountX: BN,
+  amountY: BN,
+  swap: Pick<
+    SimulateSwapInterface,
+    'ticks' | 'tickmap' | 'pool' | 'maxVirtualCrosses' | 'maxCrosses' | 'slippage'
+  >,
+  position: Pick<CreatePosition, 'lowerTick' | 'knownPrice' | 'slippage' | 'upperTick'>,
+  minPrecision: BN = toDecimal(1, 2)
+): SimulateSwapAndCreatePositionSimulation => {
+  const lowerSqrtPrice = calculatePriceSqrt(position.lowerTick)
+  const upperSqrtPrice = calculatePriceSqrt(position.upperTick)
+
+  if (upperSqrtPrice.lt(position.knownPrice)) {
+    if (amountX.eqn(0)) {
+      return {
+        swapInput: undefined,
+        swapSimulation: undefined,
+        position: getMaxLiquidity(
+          new BN(0),
+          amountY,
+          position.lowerTick,
+          position.upperTick,
+          position.knownPrice
+        )
+      }
+    }
+
+    const swapAmount = amountX
+    const sim = simulateSwap({
+      xToY: true,
+      byAmountIn: true,
+      swapAmount,
+      priceLimit: swap.pool.sqrtPrice,
+      ...swap
+    })
+
+    return {
+      swapInput: {
+        xToY: true,
+        swapAmount,
+        byAmountIn: true
+      },
+      swapSimulation: sim,
+      position: getMaxLiquidity(
+        new BN(0),
+        amountY.add(sim.accumulatedAmountOut),
+        position.lowerTick,
+        position.upperTick,
+        position.knownPrice
+      )
+    }
+  }
+
+  if (lowerSqrtPrice.gt(position.knownPrice)) {
+    if (amountY.eqn(0)) {
+      return {
+        swapInput: undefined,
+        swapSimulation: undefined,
+        position: getMaxLiquidity(
+          amountX,
+          new BN(0),
+          position.lowerTick,
+          position.upperTick,
+          position.knownPrice
+        )
+      }
+    }
+
+    const swapAmount = amountY
+    const sim = simulateSwap({
+      xToY: false,
+      byAmountIn: true,
+      swapAmount,
+      priceLimit: swap.pool.sqrtPrice,
+      ...swap
+    })
+    return {
+      swapInput: { xToY: false, swapAmount, byAmountIn: true },
+      swapSimulation: sim,
+      position: getMaxLiquidity(
+        amountX.add(sim.accumulatedAmountOut),
+        new BN(0),
+        position.lowerTick,
+        position.upperTick,
+        position.knownPrice
+      )
+    }
+  }
+
+  const { x, y, amountXDiff, amountYDiff } = computeTokenRatioDiff(amountX, amountY, position)
+
+  const tokenXUtilization = amountX.eqn(0) ? DENOMINATOR : x.mul(DENOMINATOR).div(amountX)
+  const tokenYUtilization = amountY.eqn(0) ? DENOMINATOR : y.mul(DENOMINATOR).div(amountY)
+
+  const lowestUtilization = tokenXUtilization.lt(tokenYUtilization)
+    ? tokenXUtilization
+    : tokenYUtilization
+
+  if (lowestUtilization.eq(DENOMINATOR)) {
+    const xAmount = x.gtn(1) ? x.subn(1) : x
+    const yAmount = y.gtn(1) ? y.subn(1) : y
+    return {
+      swapInput: undefined,
+      swapSimulation: undefined,
+      position: getMaxLiquidity(
+        xAmount,
+        yAmount,
+        position.lowerTick,
+        position.upperTick,
+        position.knownPrice
+      )
+    }
+  }
+
+  let xToY: boolean
+  let amount: BN
+  const byAmountIn: boolean = true
+
+  if (tokenXUtilization.gt(tokenYUtilization)) {
+    xToY = false
+    amount = amountYDiff
+  } else {
+    xToY = true
+    amount = amountXDiff
+  }
+
+  let low = new BN(0)
+  let high = amount
+  let mid = new BN(0)
+  let precision = amount.mul(minPrecision).div(DENOMINATOR)
+  precision = precision.gtn(0) ? precision : new BN(1)
+
+  let bestSim: SimulationResult | undefined
+  let bestUtilization: BN | undefined
+  let bestAmountXAfterSwap: BN | undefined
+  let bestAmountYAfterSwap: BN | undefined
+  let bestAmount: BN | undefined
+
+  while (low.add(precision).lt(high)) {
+    mid = low.add(high).addn(1).divn(2)
+
+    const sim = simulateSwap({
+      xToY,
+      byAmountIn,
+      swapAmount: mid,
+      priceLimit: swap.pool.sqrtPrice,
+      ...swap
+    })
+
+    switch (sim.status) {
+      case SimulationStatus.Ok:
+        break
+      case SimulationStatus.NoGainSwap:
+        low = mid
+        continue
+      default:
+        high = byAmountIn
+          ? sim.accumulatedAmountIn.add(sim.accumulatedFee)
+          : sim.accumulatedAmountOut
+        continue
+    }
+
+    let amountXAfterSwap: BN
+    let amountYAfterSwap: BN
+    if (xToY) {
+      amountXAfterSwap = amountX.sub(sim.accumulatedAmountIn).sub(sim.accumulatedFee)
+      amountYAfterSwap = amountY.add(sim.accumulatedAmountOut)
+    } else {
+      amountYAfterSwap = amountY.sub(sim.accumulatedAmountIn).sub(sim.accumulatedFee)
+      amountXAfterSwap = amountX.add(sim.accumulatedAmountOut)
+    }
+
+    const { x, y, amountXDiff, amountYDiff } = computeTokenRatioDiff(
+      amountXAfterSwap,
+      amountYAfterSwap,
+      position
+    )
+
+    // break early if the perfect case was found
+    if (amountXDiff.lten(0) && amountYDiff.lten(0)) {
+      const xAmount = x.gtn(1) ? x.subn(1) : x
+      const yAmount = y.gtn(1) ? y.subn(1) : y
+
+      return {
+        swapInput: {
+          xToY,
+          byAmountIn,
+          swapAmount: mid
+        },
+        swapSimulation: sim,
+        position: getMaxLiquidity(
+          xAmount,
+          yAmount,
+          position.lowerTick,
+          position.upperTick,
+          position.knownPrice
+        )
+      }
+    }
+
+    const tokenXUtilization = amountXAfterSwap.eqn(0)
+      ? DENOMINATOR
+      : x.mul(DENOMINATOR).div(amountXAfterSwap)
+    const tokenYUtilization = amountYAfterSwap.eqn(0)
+      ? DENOMINATOR
+      : y.mul(DENOMINATOR).div(amountYAfterSwap)
+
+    const lowestUtilization = tokenXUtilization.lt(tokenYUtilization)
+      ? tokenXUtilization
+      : tokenYUtilization
+
+    if (xToY) {
+      if (tokenXUtilization.lte(tokenYUtilization)) {
+        low = mid
+      } else {
+        high = mid
+      }
+    } else {
+      if (tokenYUtilization.lte(tokenXUtilization)) {
+        low = mid
+      } else {
+        high = mid
+      }
+    }
+
+    if (bestUtilization) {
+      if (lowestUtilization.gt(bestUtilization)) {
+        bestUtilization = lowestUtilization
+        bestSim = sim
+        bestAmountXAfterSwap = x
+        bestAmountYAfterSwap = y
+        bestAmount = mid
+      }
+    } else {
+      bestUtilization = lowestUtilization
+      bestSim = sim
+      bestAmountXAfterSwap = x
+      bestAmountYAfterSwap = y
+      bestAmount = mid
+    }
+  }
+
+  bestAmountXAfterSwap = bestAmountXAfterSwap
+    ? bestAmountXAfterSwap.gtn(1)
+      ? bestAmountXAfterSwap.subn(1)
+      : bestAmountXAfterSwap
+    : undefined
+  bestAmountYAfterSwap = bestAmountYAfterSwap
+    ? bestAmountYAfterSwap.gtn(1)
+      ? bestAmountYAfterSwap.subn(1)
+      : bestAmountYAfterSwap
+    : undefined
+
+  return {
+    swapInput: bestAmount
+      ? {
+          byAmountIn,
+          xToY,
+          swapAmount: bestAmount
+        }
+      : undefined,
+    swapSimulation: bestSim,
+    position:
+      bestSim && bestAmountXAfterSwap && bestAmountYAfterSwap
+        ? getMaxLiquidity(
+            bestAmountXAfterSwap,
+            bestAmountYAfterSwap,
+            position.lowerTick,
+            position.upperTick,
+            position.knownPrice
+          )
+        : { x: new BN(0), y: new BN(0), liquidity: new BN(0) }
+  }
+}
 export const parseEvent = (
   event: anchor.Event<IdlEvent, Record<string, never>> | null
 ): InvariantEvent => {
@@ -1553,6 +2156,502 @@ export const parseEvent = (
       } as SwapEvent
     default:
       throw new Error('Invalid event name')
+  }
+}
+
+export const deserializePoolLookupTables = (rawTables: SerializedLookupTableData[]) => {
+  const tableData = rawTables.map(t => deserializePoolLookupTable(t))
+
+  const tables = new Map<
+    PoolAddress,
+    [AddressLookupTableAccount, Map<AdjustedTableLookupTick, AddressLookupTableAccount>]
+  >()
+  for (const table of tableData) {
+    const key = table.poolAddrs.toString()
+    const entry = tables.get(key)
+
+    if (entry) {
+      if (table.isMainTable) {
+        entry[0] = table.table
+      } else {
+        entry[1].set(table.tickIndex!, table.table)
+      }
+    } else {
+      if (!table.isMainTable) {
+        tables.set(key, [table.table, new Map()])
+      } else {
+        const map = new Map()
+        map.set(table.tickIndex, table.table)
+        tables.set(key, [null as any, map])
+      }
+    }
+  }
+
+  return tables
+}
+
+export const deserializePoolLookupTable = (t: SerializedLookupTableData) => {
+  if (t.isMainTable) {
+    return {
+      poolAddrs: new PublicKey(t.poolAddr),
+      isMainTable: true,
+      table: deserializeLookuptableData(t.data)
+    }
+  } else {
+    return {
+      poolAddrs: new PublicKey(t.poolAddr),
+      tickIndex: Number(t.tickIndex),
+      table: deserializeLookuptableData(t.data)
+    }
+  }
+}
+
+export const deserializeLookuptableData = (
+  t: SerializedLookupTableData['data']
+): AddressLookupTableAccount => {
+  return new AddressLookupTableAccount({
+    key: new PublicKey(t.key),
+    state: {
+      authority: t.state.authority ? new PublicKey(t.state.authority) : undefined,
+      addresses: t.state.addresses.map(m => new PublicKey(m)),
+      lastExtendedSlot: t.state.lastExtendedSlot,
+      lastExtendedSlotStartIndex: t.state.lastExtendedSlotStartIndex,
+      deactivationSlot: BigInt(t.state.deactivationSlot)
+    }
+  })
+}
+
+type PoolAddress = string
+type AdjustedTableLookupTick = number
+
+const testnetCommonLookupTable: AddressLookupTableAccount = deserializeLookuptableData(
+  rawTestnetCommonLookupTable
+)
+
+// const mainnetCommonLookupTable: AddressLookupTableAccount = deserializeLookuptableData(
+//   rawMainnetCommonLookupTable
+// )
+
+export const testnetLookupTables: Map<
+  PoolAddress,
+  [AddressLookupTableAccount, Map<AdjustedTableLookupTick, AddressLookupTableAccount>]
+> = deserializePoolLookupTables(rawTestnetPoolLookuTables)
+
+export const mainnetLookupTables: Map<
+  PoolAddress,
+  [AddressLookupTableAccount, Map<AdjustedTableLookupTick, AddressLookupTableAccount>]
+> = new Map()
+
+export const TICK_COUNT_PER_LOOKUP_TABLE = 254
+
+export const getLookupTableAddresses = (
+  market: Market,
+  pair: Pair,
+  ticks: number[],
+  allTablesRequired: boolean = false
+) => {
+  ticks.sort()
+
+  const lookupTables = market.network === Network.MAIN ? mainnetLookupTables : testnetLookupTables
+  const commonLookupTable = market.network === Network.MAIN ? undefined : testnetCommonLookupTable
+
+  if (!commonLookupTable) {
+    throw new Error('Mainnet lookup table not created')
+  }
+
+  const ticksForPool = lookupTables.get(pair.getAddress(market.program.programId).toString())
+
+  if (!ticksForPool) {
+    if (allTablesRequired) {
+      throw new Error('Tick lookup addresses not found')
+    } else {
+      return []
+    }
+  }
+  const [poolLookupTable, tickLookupTables] = ticksForPool
+
+  const tickLookupTablesInRange: web3.AddressLookupTableAccount[] = []
+  tickLookupTablesInRange.push(commonLookupTable)
+  tickLookupTablesInRange.push(poolLookupTable)
+
+  if (!ticks.length) {
+    return tickLookupTablesInRange
+  }
+
+  const lowestTick = ticks[0]
+  const highestTick = ticks[ticks.length - 1]
+
+  // ticks adjusted to match the starting one
+  const low = getRealTickFromAdjustedLookupTableStartingTick(
+    pair.tickSpacing,
+    getAdjustedLookupTableStartingTick(pair.tickSpacing, lowestTick)
+  )
+  const high = getRealTickFromAdjustedLookupTableStartingTick(
+    pair.tickSpacing,
+    getAdjustedLookupTableStartingTick(pair.tickSpacing, highestTick)
+  )
+
+  for (let i = low; i <= high; i += TICK_COUNT_PER_LOOKUP_TABLE * pair.tickSpacing) {
+    const table = tickLookupTables.get(i)
+    if (!table) {
+      if (allTablesRequired) {
+        throw new Error('Tick lookup table not found')
+      } else {
+        continue
+      }
+    }
+
+    tickLookupTablesInRange.push(table)
+  }
+
+  return tickLookupTablesInRange
+}
+
+export const fetchAllLookupTables = (connection: Connection, owner: PublicKey) => {
+  return connection
+    .getProgramAccounts(AddressLookupTableProgram.programId, {
+      filters: [
+        {
+          memcmp: {
+            bytes: owner.toBase58(),
+            offset: 22
+          }
+        }
+      ]
+    })
+    .then(l =>
+      l.map(
+        l =>
+          new AddressLookupTableAccount({
+            key: l.pubkey,
+            state: AddressLookupTableAccount.deserialize(l.account.data)
+          })
+      )
+    )
+}
+
+export const fetchAllLookupTablesByPool = (
+  connection: Connection,
+  owner: PublicKey,
+  pool: PublicKey
+) => {
+  return connection
+    .getProgramAccounts(AddressLookupTableProgram.programId, {
+      filters: [
+        {
+          memcmp: {
+            bytes: owner.toBase58(),
+            offset: 22
+          }
+        },
+        {
+          memcmp: {
+            bytes: pool.toBase58(),
+            offset: 56
+          }
+        }
+      ]
+    })
+    .then(l =>
+      l.map(
+        l =>
+          new AddressLookupTableAccount({
+            key: l.pubkey,
+            state: AddressLookupTableAccount.deserialize(l.account.data)
+          })
+      )
+    )
+}
+
+export const fetchLookupTableByPoolAndAdjustedTickIndex = (
+  market: Market,
+  owner: PublicKey,
+  pair: Pair,
+  tickIndex: number
+) => {
+  const poolAddress = pair.getAddress(market.program.programId)
+
+  return market.connection
+    .getProgramAccounts(AddressLookupTableProgram.programId, {
+      filters: [
+        {
+          memcmp: {
+            bytes: owner.toBase58(),
+            offset: 22
+          }
+        },
+        {
+          memcmp: {
+            bytes: poolAddress.toBase58(),
+            offset: 56
+          }
+        },
+        {
+          memcmp: {
+            bytes: new PublicKey(new BN(tickIndex)).toBase58(),
+            offset: 88
+          }
+        }
+      ]
+    })
+    .then(l =>
+      l.map(
+        l =>
+          new AddressLookupTableAccount({
+            key: l.pubkey,
+            state: AddressLookupTableAccount.deserialize(l.account.data)
+          })
+      )
+    )
+}
+
+export const fetchLookupTableByPoolAccount = async (
+  market: Market,
+  owner: PublicKey,
+  pair: Pair
+) => {
+  const poolAddress = pair.getAddress(market.program.programId)
+  const poolAccount = await market.getPool(pair)
+
+  return market.connection
+    .getProgramAccounts(AddressLookupTableProgram.programId, {
+      filters: [
+        {
+          memcmp: {
+            bytes: owner.toBase58(),
+            offset: 22
+          }
+        },
+        {
+          memcmp: {
+            bytes: poolAddress.toBase58(),
+            offset: 56
+          }
+        },
+        {
+          memcmp: {
+            bytes: poolAccount.tickmap.toBase58(),
+            offset: 88
+          }
+        },
+        {
+          memcmp: {
+            bytes: poolAccount.tokenXReserve.toBase58(),
+            offset: 120
+          }
+        }
+      ]
+    })
+    .then(l =>
+      l.map(
+        l =>
+          new AddressLookupTableAccount({
+            key: l.pubkey,
+            state: AddressLookupTableAccount.deserialize(l.account.data)
+          })
+      )
+    )
+}
+
+export const getAdjustedLookupTableStartingTick = (tickSpacing: number, tick: number) => {
+  const minTick = getMinTick(tickSpacing)
+  const lookupTableOffset =
+    tick - minTick - ((tick - minTick) % (TICK_COUNT_PER_LOOKUP_TABLE * tickSpacing))
+
+  return lookupTableOffset
+}
+
+export const getRealTickFromAdjustedLookupTableStartingTick = (
+  tickSpacing: number,
+  tick: number
+) => {
+  const minTick = getMinTick(tickSpacing)
+  const lookupTableOffset = tick + minTick
+
+  return lookupTableOffset
+}
+
+const generateLookupTableForTicks = (market: Market, pair: Pair, adjustedStartingTick: number) => {
+  const minTick = getMinTick(pair.tickSpacing)
+  const maxTick = getMaxTick(pair.tickSpacing)
+
+  const addresses: PublicKey[] = []
+
+  const poolAddress = pair.getAddress(market.program.programId)
+  const adjustedStartingTickKey = new PublicKey(new BN(adjustedStartingTick))
+  const realStartingTick = getRealTickFromAdjustedLookupTableStartingTick(
+    pair.tickSpacing,
+    adjustedStartingTick
+  )
+
+  addresses.push(poolAddress)
+  addresses.push(adjustedStartingTickKey)
+
+  for (let i = 0; i < TICK_COUNT_PER_LOOKUP_TABLE * pair.tickSpacing; i += pair.tickSpacing) {
+    const tick = realStartingTick + i
+
+    if (tick < minTick) {
+      continue
+    } else if (tick > maxTick) {
+      break
+    }
+
+    addresses.push(market.getTickAddressByPool(poolAddress, tick).tickAddress)
+  }
+
+  return { addresses, startingTickForLookupTable: adjustedStartingTick }
+}
+
+export const generateLookupTableRangeForTicks = (
+  market: Market,
+  pair: Pair,
+  startingTick: number,
+  finalTick: number
+) => {
+  const adjustedStartingTick = getAdjustedLookupTableStartingTick(pair.tickSpacing, startingTick)
+  const adjustedFinalTick =
+    getAdjustedLookupTableStartingTick(pair.tickSpacing, finalTick) +
+    TICK_COUNT_PER_LOOKUP_TABLE * pair.tickSpacing
+
+  const lookupTables: { addresses: PublicKey[]; startingTickForLookupTable: number }[] = []
+  for (
+    let i = adjustedStartingTick;
+    i < adjustedFinalTick;
+    i += TICK_COUNT_PER_LOOKUP_TABLE * pair.tickSpacing
+  ) {
+    lookupTables.push(generateLookupTableForTicks(market, pair, i))
+  }
+
+  return lookupTables
+}
+
+export const generateLookupTableForPool = (market: Market, pair: Pair, pool: PoolStructure) => {
+  const addresses: PublicKey[] = []
+  addresses.push(pair.getAddress(market.program.programId))
+  addresses.push(pool.tickmap)
+  addresses.push(pool.tokenXReserve)
+  addresses.push(pool.tokenYReserve)
+  return addresses
+}
+
+export const generateLookupTableForCommonAccounts = (market: Market) => {
+  const addresses: PublicKey[] = []
+  addresses.push(TOKEN_2022_PROGRAM_ID)
+  addresses.push(TOKEN_PROGRAM_ID)
+  addresses.push(SystemProgram.programId)
+  addresses.push(SYSVAR_RENT_PUBKEY)
+  addresses.push(market.stateAddress.address)
+  addresses.push(market.programAuthority.address)
+  addresses.push(market.program.programId)
+
+  return addresses
+}
+
+export const createAndExtendAddressLookupTableTxs = async (
+  owner: PublicKey,
+  slot: number,
+  addresses: PublicKey[],
+  payer?: PublicKey
+) => {
+  const txBatchSize = 256
+  if (addresses.length > txBatchSize) {
+    throw new Error('Addresses too long for single address lookup table')
+  }
+
+  const payerPubkey = payer ?? owner
+  const [lookupTableInst, lookupTableAddress] = web3.AddressLookupTableProgram.createLookupTable({
+    authority: owner,
+    payer: payerPubkey,
+    recentSlot: slot
+  })
+  const ixBatchSize = 30
+  const ixCount = Math.ceil(addresses.length / ixBatchSize)
+  const extendIxs: TransactionInstruction[] = []
+
+  for (let i = 0; i < ixCount; i++) {
+    extendIxs.push(
+      web3.AddressLookupTableProgram.extendLookupTable({
+        payer: payerPubkey,
+        authority: owner,
+        lookupTable: lookupTableAddress,
+        addresses: addresses.slice(i * ixBatchSize, (i + 1) * ixBatchSize)
+      })
+    )
+  }
+
+  const initTx = new Transaction().add(lookupTableInst, extendIxs[0])
+  const remainingTxs = extendIxs.slice(1).map(ix => new Transaction().add(ix))
+
+  return { lookupTableAddress, txs: [initTx, ...remainingTxs] }
+}
+
+export const serializePoolLookupTable = (t: AddressLookupTableAccount, poolData: PoolStructure) => {
+  const addrs = t.state.addresses
+
+  if (addrs[2].equals(poolData.tokenXReserve) && addrs[3].equals(poolData.tokenYReserve)) {
+    const data = serializeLookupTableData(t)
+
+    const pooladdr = addrs[0].toString()
+    const isMainTable = true
+    return { poolAddr: pooladdr, isMainTable, data }
+  } else {
+    const data = serializeLookupTableData(t)
+
+    const poolAddr = addrs[0].toString()
+    const tickIndex = getRealTickFromAdjustedLookupTableStartingTick(
+      poolData.tickSpacing,
+      new BN(addrs[1].toBytes()).toNumber()
+    )
+
+    return { poolAddr: poolAddr, tickIndex: tickIndex.toString(), data }
+  }
+}
+
+export const serializeLookupTableData = (
+  t: AddressLookupTableAccount
+): SerializedLookupTableData['data'] => {
+  return {
+    key: t.key.toString(),
+    state: {
+      lastExtendedSlot: t.state.lastExtendedSlot,
+      lastExtendedSlotStartIndex: t.state.lastExtendedSlotStartIndex,
+      deactivationSlot: t.state.deactivationSlot.toString(),
+      authority: t.state.authority?.toString(),
+      addresses: t.state.addresses.map(a => a.toString())
+    }
+  }
+}
+
+export type SerializedLookupTableData = {
+  poolAddr: string
+  data: {
+    key: string
+    state: {
+      deactivationSlot: string
+      lastExtendedSlot: number
+      lastExtendedSlotStartIndex: number
+      authority: string | undefined
+      addresses: string[]
+    }
+  }
+} & NonNullable<
+  | {
+      isMainTable: undefined
+      tickIndex: string
+    }
+  | {
+      tickIndex: undefined
+      isMainTable: boolean
+    }
+>
+
+export type SimulateSwapAndCreatePositionSimulation = {
+  swapInput?: { xToY: boolean; swapAmount: BN; byAmountIn: boolean }
+  swapSimulation?: SimulationResult
+  position: {
+    x: BN
+    y: BN
+    liquidity: BN
   }
 }
 

@@ -620,6 +620,82 @@ export const getLiquidityByYPrice = (
   }
 }
 
+export const getMaxLiquidity = (
+  x: BN,
+  y: BN,
+  tickLower: number,
+  tickUpper: number,
+  currentSqrtPrice: BN
+) => {
+  assert(tickLower < tickUpper)
+  const lowerSqrtPrice = calculatePriceSqrt(tickLower)
+  const upperSqrtPrice = calculatePriceSqrt(tickUpper)
+
+  if (upperSqrtPrice.lte(currentSqrtPrice)) {
+    return { ...getLiquidityByYPrice(y, lowerSqrtPrice, upperSqrtPrice, currentSqrtPrice, true), y }
+  }
+  if (currentSqrtPrice.lte(lowerSqrtPrice)) {
+    return { ...getLiquidityByXPrice(x, lowerSqrtPrice, upperSqrtPrice, currentSqrtPrice, true), x }
+  }
+
+  const liquidityByY = getLiquidityByYPrice(
+    y,
+    lowerSqrtPrice,
+    upperSqrtPrice,
+    currentSqrtPrice,
+    true
+  )
+  const liquidityByX = getLiquidityByXPrice(
+    x,
+    lowerSqrtPrice,
+    upperSqrtPrice,
+    currentSqrtPrice,
+    true
+  )
+
+  if (liquidityByX.liquidity.gt(liquidityByY.liquidity)) {
+    if (liquidityByX.y.lte(y)) {
+      return {
+        ...liquidityByX,
+        x
+      }
+    } else {
+      return {
+        ...liquidityByY,
+        y
+      }
+    }
+  } else {
+    if (liquidityByY.x.lte(x)) {
+      return {
+        ...liquidityByY,
+        y
+      }
+    } else {
+      return {
+        ...liquidityByX,
+        x
+      }
+    }
+  }
+}
+
+export const getMaxLiquidityWithPercentage = (
+  x: BN,
+  y: BN,
+  tickLower: number,
+  tickUpper: number,
+  currentSqrtPrice: BN,
+  maxLiquidityPercentage: BN
+) => {
+  const { x: xMax, y: yMax } = getMaxLiquidity(x, y, tickLower, tickUpper, currentSqrtPrice)
+
+  const xPercentage = xMax.mul(maxLiquidityPercentage).div(DENOMINATOR)
+  const yPercentage = yMax.mul(maxLiquidityPercentage).div(DENOMINATOR)
+
+  return getMaxLiquidity(xPercentage, yPercentage, tickLower, tickUpper, currentSqrtPrice)
+}
+
 export const calculateFeeGrowthInside = (
   lowerTick: Tick,
   upperTick: Tick,
@@ -651,7 +727,7 @@ export const calculateFeeGrowthInside = (
   }
 
   const feeGrowthInsideX: BN = feeGrowthGlobalX.sub(feeGrowthBelowX).sub(feeGrowthAboveX)
-  
+
   const feeGrowthInsideY: BN = feeGrowthGlobalY.sub(feeGrowthBelowY).sub(feeGrowthAboveY)
 
   return [feeGrowthInsideX, feeGrowthInsideY]
