@@ -77,15 +77,15 @@ export const CONCENTRATION_FACTOR = 1.00001526069123
 export const PROTOCOL_FEE: number = 0.01
 export const MIN_BALANCE_FOR_RENT_EXEMPT = {
   [Network.LOCAL]: 2039280, // AnchorProvider defaults to solana's minimum amount
-  [Network.DEV]: 19924,
-  [Network.TEST]: 19924,
-  [Network.MAIN]: 19924
+  [Network.DEV]: 2039280,
+  [Network.TEST]: 2039280,
+  [Network.MAIN]: 2039280
 }
 export const MIN_BALANCE_FOR_TICKMAP_RENT_EXEMPT = {
   [Network.LOCAL]: 78139920, // AnchorProvider defaults to solana's minimum amount
-  [Network.DEV]: 763436,
-  [Network.TEST]: 763436,
-  [Network.MAIN]: 763436
+  [Network.DEV]: 78139920,
+  [Network.TEST]: 78139920,
+  [Network.MAIN]: 78139920
 }
 
 export enum ERRORS {
