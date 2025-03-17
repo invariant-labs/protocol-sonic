@@ -9,7 +9,7 @@ pub use errors::ErrorCode;
 pub use instructions::*;
 pub use types::*;
 
-declare_id!("34CS5UnQfoNmJ2MUgBc2VuM3BYFv7oYJTbEsbKrp3Zia");
+declare_id!("LockDkUjGpMHewP4cbP7XRpiiC4ciQaPALbwUALCEJp");
 
 #[program]
 pub mod locker {

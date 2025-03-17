@@ -23,7 +23,7 @@ export const getMarketAddress = (network: Network) => {
 export const getInvariantAutoswapAddress = (network: Network) => {
   switch (network) {
     case Network.LOCAL:
-      return 'BdexSTDwoK29CUbzi1arkAWEHG98owYY1DgeWiCpGHEh'
+      return 'AuTonVN41Ne17RGR2o9qTj3TmtKcTwmUUy1ebbTmpiU'
     case Network.DEV:
       return 'BdexSTDwoK29CUbzi1arkAWEHG98owYY1DgeWiCpGHEh'
     case Network.TEST:
