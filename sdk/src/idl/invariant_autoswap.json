@@ -264,5 +264,8 @@
       "name": "InvalidAuthority",
       "msg": "Provided authority is different than expected"
     }
-  ]
+  ],
+  "metadata": {
+    "address": "BdexSTDwoK29CUbzi1arkAWEHG98owYY1DgeWiCpGHEh"
+  }
 }

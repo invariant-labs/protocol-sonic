@@ -353,7 +353,6 @@ export const FEE_TIERS: FeeTier[] = [
   { fee: fromFee(new BN(10)), tickSpacing: 1 },
   { fee: fromFee(new BN(20)), tickSpacing: 5 },
   { fee: fromFee(new BN(50)), tickSpacing: 5 },
-  { fee: fromFee(new BN(90)), tickSpacing: 10 },
   { fee: fromFee(new BN(100)), tickSpacing: 10 },
   { fee: fromFee(new BN(300)), tickSpacing: 30 },
   { fee: fromFee(new BN(1000)), tickSpacing: 100 }

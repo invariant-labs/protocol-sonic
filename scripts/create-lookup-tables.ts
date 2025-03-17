@@ -34,11 +34,11 @@ const connection = provider.connection
 const wallet = provider.wallet.payer as Keypair
 const commonLookupTableExist = true
 
-// // SOL/USDC - TESTNET
-const token0 = new PublicKey('So11111111111111111111111111111111111111112')
+// ETH/USDC - TESTNET
+const token0 = new PublicKey('62rMuAVWh2mQYE9wP4cPhaLDsbn8SzQNbHyJqUM6oQCB')
 const token1 = new PublicKey('6B8zhSGkjZcQxHCE9RFwYMxT8ipifJ4JZLFTskLMcMeL')
-const minTick = 480
-const maxTick = 40480
+const minTick = 72380
+const maxTick = 82380
 const tierIndex = 3
 // let ledgerWallet: LedgerWalletProvider
 // let ledgerPubkey: PublicKey = PublicKey.default

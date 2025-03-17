@@ -25,7 +25,7 @@ const owner = new PublicKey('7zwsfwpnrxLHA65hzWMZfRtRDva9VjDRrMFWMjp5ZtRi')
 const commonLookupTableAddress = new PublicKey('HhXMWL3q3sZ6HWh4kM9NS7vqg9RvVuAP1VqUbXFxhPsW')
 
 const pools = [
-  new PublicKey('HjujFgVe4Yr7z8ge7JhokoQvuuu7e668k5d95zFsaG1S') // SOL/USDC 0.09 - TESTNET
+  new PublicKey('H4QcXPqL88TUhgD2U5CgJRQEn1qMcBbxRkdczTPxP71f') // ETH/USDC 0.1 - TESTNET
 ]
 
 const main = async () => {
