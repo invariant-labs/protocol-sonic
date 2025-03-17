@@ -18,7 +18,7 @@ const SWAP_POOLS: [&'static str; 5] = [
     "2QC7osoRf9FU55hyjBXrsCK3em5wHREGm53t264RQrpc", // Pool address used in tests
     "B4XuhBqztnfMHeDVLDwnqPuGDMTrWRzUMzAHSkBJUQg3", // Pool address used in tests
     "7JuNzpcJBrpXWvETstYEYHcMBMc5eZeMeCxkHzsxmCNZ", // Pool address used in tests
-    "H4QcXPqL88TUhgD2U5CgJRQEn1qMcBbxRkdczTPxP71f", // testnet ETH/USDC 0.09%
+    "H4QcXPqL88TUhgD2U5CgJRQEn1qMcBbxRkdczTPxP71f", // testnet ETH/USDC 0.1%
 ];
 
 const POSITION_POOLS: [&'static str; 11] = [

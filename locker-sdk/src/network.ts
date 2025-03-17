@@ -14,7 +14,7 @@ export const getLockerAddress = (network: Network) => {
     case Network.DEV:
       return '34CS5UnQfoNmJ2MUgBc2VuM3BYFv7oYJTbEsbKrp3Zia'
     case Network.MAIN:
-      return '34CS5UnQfoNmJ2MUgBc2VuM3BYFv7oYJTbEsbKrp3Zia'
+      return 'LockDkUjGpMHewP4cbP7XRpiiC4ciQaPALbwUALCEJp'
     default:
       throw new Error('Unknown network')
   }
