@@ -1167,6 +1167,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "invariant_autoswap"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+ "bytemuck",
+ "decimal",
+ "integer-sqrt",
+ "invariant",
+ "num-traits",
+]
+
+[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,6 +1,6 @@
 {
   "name": "@invariant-labs/locker-sonic-sdk",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -21,7 +21,7 @@
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.29.0",
-    "@invariant-labs/sdk-sonic": "^0.0.2",
+    "@invariant-labs/sdk-sonic": "^0.0.11",
     "chai": "^4.3.0"
   }
 }

@@ -43,10 +43,21 @@ import {
   TICK_LIMIT,
   calculatePriceSqrt,
   LIQUIDITY_DENOMINATOR,
-  sleep
+  sleep,
+  signAndSend
 } from '@invariant-labs/sdk'
 import { assert } from 'chai'
-import { getBalance } from '@invariant-labs/sdk/lib/utils'
+import {
+  createAndExtendAddressLookupTableTxs,
+  fetchLookupTableByPoolAccount,
+  fetchLookupTableByPoolAndAdjustedTickIndex,
+  generateLookupTableForCommonAccounts,
+  generateLookupTableForPool,
+  generateLookupTableRangeForTicks,
+  getBalance,
+  getRealTickFromAdjustedLookupTableStartingTick,
+  TICK_COUNT_PER_LOOKUP_TABLE
+} from '@invariant-labs/sdk/lib/utils'
 
 export async function assertThrowsAsync(fn: Promise<any>, word?: string) {
   try {
@@ -1111,4 +1122,178 @@ export const usdcUsdhPoolSnapshot = {
     }
   ],
   currentTickIndex: 4
+}
+
+export const createPoolLookupTable = async (market: Market, pair: Pair, wallet: Keypair) => {
+  const poolAsssociatedAddresses = generateLookupTableForPool(
+    market,
+    pair,
+    await market.getPool(pair)
+  )
+
+  const accounts = await fetchLookupTableByPoolAccount(market, wallet.publicKey, pair)
+  if (accounts.length) {
+    console.warn('Pool account lookup table already initialized')
+    for (let i = 0; i < poolAsssociatedAddresses.length; i++) {
+      assert(accounts[0].state.addresses[i].equals(poolAsssociatedAddresses[i]))
+      return accounts[0].key
+    }
+  }
+
+  console.log(
+    'Creating pool lookup tables for',
+    pair.getAddress(market.program.programId).toString()
+  )
+
+  const slot = await market.connection.getSlot('finalized')
+
+  const createPoolLookupTableTxs = await createAndExtendAddressLookupTableTxs(
+    wallet.publicKey,
+    slot,
+    poolAsssociatedAddresses
+  )
+  console.log('Pool associated addresses', createPoolLookupTableTxs.lookupTableAddress.toString())
+
+  assert(createPoolLookupTableTxs.txs.length === 1)
+
+  await signAndSend(createPoolLookupTableTxs.txs[0], [wallet], market.connection)
+  return createPoolLookupTableTxs.lookupTableAddress
+}
+
+export const createTickLookupTables = async (
+  market: Market,
+  pair: Pair,
+  wallet: Keypair,
+  startingTick: number,
+  finalTick: number,
+  validateAfter: boolean = false,
+  validateDelay: number = 12000
+) => {
+  const ticks = generateLookupTableRangeForTicks(market, pair, startingTick, finalTick)
+  const addresses: [number, PublicKey][] = []
+  const currentSlot = await market.connection.getSlot('recent')
+  const slots = await market.connection.getBlocks(currentSlot - 40, currentSlot, 'finalized')
+  let slotsCounter = 0
+
+  if (slots.length <= (startingTick - finalTick) / TICK_COUNT_PER_LOOKUP_TABLE) {
+    throw new Error(`Could find only ${slots.length} ${slots} on the main fork`)
+  }
+
+  for (const tickRange of ticks) {
+    try {
+      const result = await fetchLookupTableByPoolAndAdjustedTickIndex(
+        market,
+        wallet.publicKey,
+        pair,
+        tickRange.startingTickForLookupTable
+      )
+
+      console.warn(
+        'Lookup table already initialized:',
+        result[0].key.toString(),
+        'with',
+        result[0].state.addresses.length,
+        'addresses, on tick:',
+        getRealTickFromAdjustedLookupTableStartingTick(
+          pair.tickSpacing,
+          tickRange.startingTickForLookupTable
+        )
+      )
+      for (let i = 0; i < tickRange.addresses.length; i++) {
+        let correct = true
+        if (i === 1) {
+          correct = new BN(result[0].state.addresses[i].toBuffer()).eq(
+            new BN(tickRange.addresses[i].toBuffer())
+          )
+        } else {
+          correct = result[0].state.addresses[i].equals(tickRange.addresses[i])
+        }
+        assert(
+          correct,
+          `Address of the existing table at index ${i} is incorrect, remove the table and try again`
+        )
+      }
+
+      continue
+    } catch (e) {}
+
+    const lookupTableTxs = await createAndExtendAddressLookupTableTxs(
+      wallet.publicKey,
+      slots[slotsCounter],
+      tickRange.addresses
+    )
+
+    slotsCounter += 1
+
+    console.log(
+      'Processing table',
+      lookupTableTxs.lookupTableAddress.toString(),
+      'with starting index',
+      getRealTickFromAdjustedLookupTableStartingTick(
+        pair.tickSpacing,
+        tickRange.startingTickForLookupTable
+      )
+    )
+
+    assert(tickRange.addresses[0].equals(pair.getAddress(market.program.programId)))
+    assert(
+      tickRange.addresses[1].equals(new PublicKey(new BN(tickRange.startingTickForLookupTable)))
+    )
+
+    const [initTx, ...remiaining] = lookupTableTxs.txs
+
+    await signAndSend(initTx, [wallet], market.connection)
+    await sleep(400)
+
+    addresses.push([
+      getRealTickFromAdjustedLookupTableStartingTick(
+        pair.tickSpacing,
+        tickRange.startingTickForLookupTable
+      ),
+      lookupTableTxs.lookupTableAddress
+    ])
+
+    for (const rem of remiaining) {
+      await signAndSend(rem, [wallet], market.connection)
+    }
+    if (validateAfter) {
+      await sleep(validateDelay ?? 12000)
+      const result = await fetchLookupTableByPoolAndAdjustedTickIndex(
+        market,
+        wallet.publicKey,
+        pair,
+        tickRange.startingTickForLookupTable
+      )
+
+      if (result.length === 1) {
+        for (let i = 0; i < tickRange.addresses.length; i++) {
+          let correct = true
+          if (i === 1) {
+            correct = new BN(result[0].state.addresses[i].toBuffer()).eq(
+              new BN(tickRange.addresses[i].toBuffer())
+            )
+          } else {
+            correct = result[0].state.addresses[i].equals(tickRange.addresses[i])
+          }
+          assert(correct, `Address at index ${i} is incorrect, remove the table and try again`)
+        }
+      } else {
+        throw new Error(
+          'Multiple lookup tables exist, deactivate and close existing tables to esure that the right one is being fetched'
+        )
+      }
+    }
+  }
+  return addresses
+}
+
+export const createCommonLookupTable = async (market: Market, wallet: Keypair) => {
+  const slot = await market.connection.getSlot('finalized')
+  const accounts = generateLookupTableForCommonAccounts(market)
+  const tx = await createAndExtendAddressLookupTableTxs(wallet.publicKey, slot, accounts)
+  console.info('Initializing common lookup table', tx.lookupTableAddress.toString())
+
+  await signAndSend(tx.txs[0], [wallet], market.connection)
+
+  return tx.lookupTableAddress
 }

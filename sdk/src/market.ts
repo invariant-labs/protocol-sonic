@@ -1,5 +1,6 @@
-import { AnchorProvider, BN, BorshEventCoder, Program, utils } from '@coral-xyz/anchor'
+import { AnchorProvider, BN, BorshEventCoder, Program, utils, web3 } from '@coral-xyz/anchor'
 import {
+  AddressLookupTableAccount,
   Connection,
   Keypair,
   PublicKey,
@@ -15,9 +16,10 @@ import {
   findClosestTicks,
   getX,
   getY,
-  isInitialized
+  isInitialized,
+  TICK_SEARCH_RANGE
 } from './math'
-import { getMarketAddress, Network } from './network'
+import { getInvariantAutoswapAddress, getMarketAddress, Network } from './network'
 import {
   calculateClaimAmount,
   computeUnitsInstruction,
@@ -27,6 +29,7 @@ import {
   fromFee,
   getBalance,
   getFeeTierAddress,
+  getLookupTableAddresses,
   getMaxTick,
   getMinTick,
   getPrice,
@@ -45,6 +48,8 @@ import {
 } from './utils'
 import { Invariant } from './idl/invariant'
 import * as IDL from './idl/invariant.json'
+import { InvariantAutoswap } from './idl/invariant_autoswap'
+import * as autoswapIDL from './idl/invariant_autoswap.json'
 import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes'
 import { getAssociatedTokenAddressSync, NATIVE_MINT } from '@solana/spl-token'
 
@@ -66,6 +71,7 @@ export class Market {
   public connection: Connection
   public wallet: IWallet
   public program: Program<Invariant>
+  public autoswapProgram: Program<InvariantAutoswap>
   public stateAddress: AddressAndBump
   public programAuthority: AddressAndBump
   public network: Network
@@ -81,8 +87,14 @@ export class Market {
     this.wallet = wallet
     const provider = new AnchorProvider(connection, wallet, AnchorProvider.defaultOptions())
     const programAddress = getMarketAddress(network)
+    const autoswapProgramAddress = getInvariantAutoswapAddress(network)
     this.network = network
     this.program = new Program<Invariant>(IDL as unknown as Invariant, programAddress, provider)
+    this.autoswapProgram = new Program<InvariantAutoswap>(
+      autoswapIDL as unknown as InvariantAutoswap,
+      autoswapProgramAddress,
+      provider
+    )
     this.eventDecoder = new BorshEventCoder(IDL as unknown as Invariant)
     this.stateAddress = this.getStateAddress()
     this.programAuthority = this.getProgramAuthority()
@@ -964,6 +976,292 @@ export class Market {
     await signAndSend(tx, [signer], this.connection)
   }
 
+  private async createPositionAccounts(
+    pair: Pair,
+    lowerTick: number,
+    upperTick: number,
+    userTokenX: PublicKey,
+    userTokenY: PublicKey,
+    owner?: PublicKey,
+    cache: CreatePositionInstructionCache = {}
+  ) {
+    owner = owner ?? this.wallet.publicKey
+
+    // maybe in the future index cloud be store at market
+    const { tickAddress: lowerTickAddress } = this.getTickAddress(pair, lowerTick)
+    const { tickAddress: upperTickAddress } = this.getTickAddress(pair, upperTick)
+    const poolAddress = pair.getAddress(this.program.programId)
+    const { positionListAddress } = this.getPositionListAddress(owner)
+
+    const [state, head, tokenXProgram, tokenYProgram] = await Promise.all([
+      cache.pool ?? this.getPool(pair),
+      cache.positionList?.head ??
+        (async () => {
+          try {
+            const positionListHead = await this.getPositionList(owner).then(p => p.head)
+            cache.positionList = { initialized: true, head: positionListHead }
+            return positionListHead
+          } catch (e) {
+            cache.positionList = { initialized: false, head: 0 }
+            return 0
+          }
+        })(),
+      cache.tokenXProgramAddress ?? getTokenProgramAddress(this.connection, pair.tokenX),
+      cache.tokenYProgramAddress ?? getTokenProgramAddress(this.connection, pair.tokenY)
+    ])
+    cache.pool = state
+    cache.tokenXProgramAddress = tokenXProgram
+    cache.tokenYProgramAddress = tokenYProgram
+
+    const { positionAddress } = this.getPositionAddress(owner, head)
+
+    return {
+      state: this.stateAddress.address,
+      pool: poolAddress,
+      positionList: positionListAddress,
+      position: positionAddress,
+      tickmap: state.tickmap,
+      owner,
+      payer: owner,
+      lowerTick: lowerTickAddress,
+      upperTick: upperTickAddress,
+      tokenX: pair.tokenX,
+      tokenY: pair.tokenY,
+      accountX: userTokenX,
+      accountY: userTokenY,
+      reserveX: state.tokenXReserve,
+      reserveY: state.tokenYReserve,
+      programAuthority: this.programAuthority.address,
+      tokenXProgram,
+      tokenYProgram,
+      rent: SYSVAR_RENT_PUBKEY,
+      systemProgram: SystemProgram.programId,
+      eventOptAcc: this.getEventOptAccount(poolAddress).address
+    }
+  }
+
+  async swapAndCreatePositionTx(
+    createPosition: SwapAndCreatePosition,
+    ticks: Ticks = {
+      tickCrosses: TICK_CROSSES_PER_IX
+    },
+    cache: SwapAndCreatePositionTransactionCache = {}
+  ) {
+    const positionPair =
+      createPosition.swapAndCreateOnDifferentPools?.positionPair ?? createPosition.swapPair
+
+    const tx = await this.createAssociatedPositionAccountsTx(
+      { pair: positionPair, ...createPosition },
+      cache.position
+    )
+    const setCuIx = computeUnitsInstruction(
+      1_400_000,
+      createPosition.owner ?? this.wallet.publicKey
+    )
+
+    const createPositionTx = await this.swapAndCreatePositionIx(createPosition, ticks, cache)
+
+    return tx.add(setCuIx).add(createPositionTx)
+  }
+
+  async swapAndCreatePositionIx(
+    createPosition: SwapAndCreatePosition,
+    ticks: Ticks = {
+      tickCrosses: TICK_CROSSES_PER_IX
+    },
+    cache: SwapAndCreatePositionInstructionCache = {}
+  ) {
+    const {
+      swapPair,
+      owner,
+      userTokenX,
+      userTokenY,
+      lowerTick,
+      upperTick,
+      amount,
+      referralAccount,
+      xToY,
+      estimatedPriceAfterSwap,
+      byAmountIn,
+      liquidityDelta,
+      minUtilizationPercentage,
+      slippage,
+      amountX,
+      amountY
+    } = createPosition
+    const swapPriceLimit = calculatePriceAfterSlippage(estimatedPriceAfterSwap, slippage, !xToY)
+
+    const positionPair = createPosition.swapAndCreateOnDifferentPools?.positionPair ?? swapPair
+    const positionPrice =
+      createPosition.swapAndCreateOnDifferentPools?.positionPoolPrice ?? estimatedPriceAfterSwap
+    const positionSlippage =
+      createPosition.swapAndCreateOnDifferentPools?.positionSlippage ?? slippage
+
+    const slippageLimitLower = calculatePriceAfterSlippage(positionPrice, positionSlippage, false)
+    const slippageLimitUpper = calculatePriceAfterSlippage(positionPrice, positionSlippage, true)
+    const upperTickIndex = upperTick !== Infinity ? upperTick : getMaxTick(positionPair.tickSpacing)
+    const lowerTickIndex =
+      lowerTick !== -Infinity ? lowerTick : getMinTick(positionPair.tickSpacing)
+
+    const liquiditySlippage = minUtilizationPercentage.mul(liquidityDelta).div(DENOMINATOR)
+
+    const [positionAccounts, swapPool, prefetchedTickmap] = await Promise.all([
+      this.createPositionAccounts(
+        positionPair,
+        lowerTickIndex,
+        upperTickIndex,
+        userTokenX,
+        userTokenY,
+        owner,
+        cache.position
+      ),
+      cache.swap?.pool ?? this.getPool(swapPair),
+      cache.swap?.pool?.tickmap ?? cache.swap?.pool
+        ? this.getTickmap(swapPair, cache.swap?.pool)
+        : undefined
+    ])
+    const swapTickmap = prefetchedTickmap ?? (await this.getTickmap(swapPair, swapPool))
+
+    const tickAddresses =
+      ticks.tickAddresses ??
+      this.findTickAddressesForSwap(
+        swapPair,
+        swapPool,
+        swapTickmap,
+        xToY,
+        (ticks as { tickCrosses: number }).tickCrosses - (referralAccount ? 1 : 0)
+      )
+    const remainingAccounts = tickAddresses
+    if (referralAccount) {
+      remainingAccounts.unshift(referralAccount)
+    }
+
+    // trunk-ignore(eslint)
+    const ra: Array<{ pubkey: PublicKey; isWritable: boolean; isSigner: boolean }> =
+      remainingAccounts.map(pubkey => {
+        return { pubkey, isWritable: true, isSigner: false }
+      })
+    return this.autoswapProgram.methods
+      .swapAndCreatePosition(
+        lowerTick,
+        upperTick,
+        amount,
+        xToY,
+        { v: swapPriceLimit },
+        byAmountIn,
+        amountX,
+        amountY,
+        { v: liquiditySlippage },
+        { v: slippageLimitLower },
+        { v: slippageLimitUpper }
+      )
+      .accounts({
+        rent: SYSVAR_RENT_PUBKEY,
+        invariant: this.program.programId,
+        state: positionAccounts.state,
+        tokenX: positionAccounts.tokenX,
+        tokenY: positionAccounts.tokenY,
+        tokenXProgram: positionAccounts.tokenXProgram,
+        tokenYProgram: positionAccounts.tokenYProgram,
+        accountX: positionAccounts.accountX,
+        accountY: positionAccounts.accountY,
+        position: positionAccounts.position,
+        positionList: positionAccounts.positionList,
+        owner: positionAccounts.owner,
+        positionPool: positionAccounts.pool,
+        positionReserveX: positionAccounts.reserveX,
+        positionReserveY: positionAccounts.reserveY,
+        positionTickmap: positionAccounts.tickmap,
+        lowerTick: positionAccounts.lowerTick,
+        upperTick: positionAccounts.upperTick,
+        eventOptAcc: this.getEventOptAccount(positionPair.getAddress(this.program.programId))
+          .address,
+        swapPool: swapPair.getAddress(this.program.programId),
+        swapReserveX: swapPool.tokenXReserve,
+        swapReserveY: swapPool.tokenYReserve,
+        swapTickmap: swapPool.tickmap,
+        systemProgram: positionAccounts.systemProgram,
+        programAuthority: positionAccounts.programAuthority
+      })
+      .remainingAccounts(ra)
+      .instruction()
+  }
+
+  async versionedSwapAndCreatePositionTx(
+    createPosition: SwapAndCreatePosition,
+    ticks: TickIndexesOrCrosses,
+    cache: SwapAndCreatePositionTransactionCache & { blockhash?: string } = {},
+    prependedIxs: TransactionInstruction[] = [],
+    appendedIxs: TransactionInstruction[] = [],
+    tableLookups?: AddressLookupTableAccount[]
+  ) {
+    const swapPair = createPosition.swapPair
+    const positionPair = createPosition.swapAndCreateOnDifferentPools?.positionPair ?? swapPair
+
+    const upperTickIndex =
+      createPosition.upperTick !== Infinity
+        ? createPosition.upperTick
+        : getMaxTick(positionPair.tickSpacing)
+    const lowerTickIndex =
+      createPosition.lowerTick !== -Infinity
+        ? createPosition.lowerTick
+        : getMinTick(positionPair.tickSpacing)
+
+    const [_, swapPool, prefetchedTickmap, fetchedBlockHash] = await Promise.all([
+      this.createPositionAccounts(
+        positionPair,
+        lowerTickIndex,
+        upperTickIndex,
+        createPosition.userTokenX,
+        createPosition.userTokenY,
+        createPosition.owner,
+        cache.position
+      ),
+      cache.swap?.pool ?? this.getPool(swapPair),
+      cache.swap?.pool?.tickmap ?? cache.swap?.pool
+        ? this.getTickmap(swapPair, cache.swap?.pool)
+        : undefined,
+      cache.blockhash ?? this.connection.getLatestBlockhash().then(h => h.blockhash)
+    ])
+
+    const swapTickmap = prefetchedTickmap ?? (await this.getTickmap(swapPair, swapPool))
+
+    cache.position ??= {}
+    cache.swap ??= {}
+    cache.swap.pool = swapPool
+    cache.swap.tickmap = swapTickmap
+
+    let tickIndexes: number[] = []
+    if (ticks.tickIndexes) {
+      tickIndexes = ticks.tickIndexes
+    } else {
+      tickIndexes = this.findTickIndexesForSwap(
+        cache.swap.pool,
+        cache.swap.tickmap,
+        createPosition.xToY,
+        ticks.tickCrosses
+      )
+    }
+
+    const lookups = tableLookups ?? getLookupTableAddresses(this, swapPair, tickIndexes)
+    const tickAddresses = tickIndexes.map(index => this.getTickAddress(swapPair, index).tickAddress)
+
+    if (!lookups.every(p => p !== undefined)) {
+      throw new Error('Not all lookup tables were defined')
+    }
+
+    const swapTx = await this.swapAndCreatePositionTx(createPosition, {
+      tickAddresses: tickAddresses
+    })
+
+    const messageV0 = new web3.TransactionMessage({
+      payerKey: createPosition.owner ?? this.wallet.publicKey,
+      recentBlockhash: fetchedBlockHash,
+      instructions: [...prependedIxs, ...swapTx.instructions, ...appendedIxs]
+    }).compileToV0Message(lookups)
+
+    return new web3.VersionedTransaction(messageV0)
+  }
   async createPositionIx(
     {
       pair,
@@ -978,34 +1276,21 @@ export class Market {
     }: CreatePosition,
     cache: CreatePositionInstructionCache = {}
   ) {
-    owner = owner ?? this.wallet.publicKey
     const slippageLimitLower = calculatePriceAfterSlippage(knownPrice, slippage, false)
     const slippageLimitUpper = calculatePriceAfterSlippage(knownPrice, slippage, true)
 
     const upperTickIndex = upperTick !== Infinity ? upperTick : getMaxTick(pair.tickSpacing)
     const lowerTickIndex = lowerTick !== -Infinity ? lowerTick : getMinTick(pair.tickSpacing)
 
-    // maybe in the future index cloud be store at market
-    const { tickAddress: lowerTickAddress } = this.getTickAddress(pair, lowerTickIndex)
-    const { tickAddress: upperTickAddress } = this.getTickAddress(pair, upperTickIndex)
-    const poolAddress = pair.getAddress(this.program.programId)
-    const { positionListAddress } = this.getPositionListAddress(owner)
-
-    const [state, head, tokenXProgram, tokenYProgram] = await Promise.all([
-      cache.pool ?? this.getPool(pair),
-      cache.positionList?.head ??
-        (async () => {
-          try {
-            return this.getPositionList(owner).then(p => p.head)
-          } catch (e) {
-            return 0
-          }
-        })(),
-      cache.tokenXProgramAddress ?? getTokenProgramAddress(this.connection, pair.tokenX),
-      cache.tokenYProgramAddress ?? getTokenProgramAddress(this.connection, pair.tokenY)
-    ])
-
-    const { positionAddress } = this.getPositionAddress(owner, head)
+    const accounts = await this.createPositionAccounts(
+      pair,
+      lowerTickIndex,
+      upperTickIndex,
+      userTokenX,
+      userTokenY,
+      owner,
+      cache
+    )
 
     return this.program.methods
       .createPosition(
@@ -1015,34 +1300,11 @@ export class Market {
         { v: slippageLimitLower },
         { v: slippageLimitUpper }
       )
-      .accounts({
-        state: this.stateAddress.address,
-        pool: poolAddress,
-        positionList: positionListAddress,
-        position: positionAddress,
-        tickmap: state.tickmap,
-        owner,
-        payer: owner,
-        lowerTick: lowerTickAddress,
-        upperTick: upperTickAddress,
-        tokenX: pair.tokenX,
-        tokenY: pair.tokenY,
-        accountX: userTokenX,
-        accountY: userTokenY,
-        reserveX: state.tokenXReserve,
-        reserveY: state.tokenYReserve,
-        programAuthority: this.programAuthority.address,
-        tokenXProgram,
-        tokenYProgram,
-        rent: SYSVAR_RENT_PUBKEY,
-        systemProgram: SystemProgram.programId,
-        eventOptAcc: this.getEventOptAccount(poolAddress).address
-      })
+      .accounts(accounts)
       .instruction()
   }
-
-  async createPositionTx(
-    createPosition: CreatePosition,
+  private async createAssociatedPositionAccountsTx(
+    createPosition: Pick<CreatePosition, 'pair' | 'lowerTick' | 'upperTick' | 'owner'>,
     cache: CreatePositionTransactionCache = {}
   ) {
     const { pair, lowerTick: lowerIndex, upperTick: upperIndex } = createPosition
@@ -1052,7 +1314,6 @@ export class Market {
 
     // undefined - tmp solution
     let positionListInstruction: TransactionInstruction | undefined
-    let positionInstruction: TransactionInstruction
     let lowerTickInstruction: TransactionInstruction | undefined
     let upperTickInstruction: TransactionInstruction | undefined
     let positionList: PositionListCache
@@ -1146,17 +1407,24 @@ export class Market {
       positionListInstruction = await this.createPositionListIx(payer)
     }
 
-    positionInstruction = await this.createPositionIx(createPosition, cache)
-
+    if (positionListInstruction) {
+      tx.add(positionListInstruction)
+    }
     if (lowerTickInstruction) {
       tx.add(lowerTickInstruction)
     }
     if (upperTickInstruction) {
       tx.add(upperTickInstruction)
     }
-    if (positionListInstruction) {
-      tx.add(positionListInstruction)
-    }
+
+    return tx
+  }
+  async createPositionTx(
+    createPosition: CreatePosition,
+    cache: CreatePositionTransactionCache = {}
+  ) {
+    const tx = await this.createAssociatedPositionAccountsTx(createPosition, cache)
+    const positionInstruction = await this.createPositionIx(createPosition, cache)
 
     return tx.add(positionInstruction)
   }
@@ -1169,6 +1437,17 @@ export class Market {
     const tx = await this.createPositionTx(createPosition, cache)
 
     await signAndSend(tx, [signer], this.connection)
+  }
+
+  async swapAndCreatePosition(
+    createPosition: SwapAndCreatePosition,
+    signer: Keypair,
+    ticks: Ticks = { tickCrosses: TICK_CROSSES_PER_IX },
+    cache: SwapAndCreatePositionInstructionCache = {}
+  ) {
+    const tx = await this.swapAndCreatePositionTx(createPosition, ticks, cache)
+
+    await signAndSend(tx, [signer], this.connection, { skipPreflight: true })
   }
 
   // async changeLiquidity(changeLiquidity: ChangeLiquidity, signer: Keypair) {
@@ -1356,9 +1635,7 @@ export class Market {
     await signAndSend(createPoolTx, [signer, ...createPoolSigners], this.connection)
     await signAndSend(createPositionTx, [signer], this.connection)
   }
-
-  findTickAddressesForSwap(
-    pair: Pair,
+  findTickIndexesForSwap(
     pool: PoolStructure,
     tickmap: Tickmap,
     xToY: boolean,
@@ -1369,7 +1646,7 @@ export class Market {
       pool.currentTickIndex,
       pool.tickSpacing,
       tickCrosses,
-      Infinity,
+      (tickCrosses + TICK_VIRTUAL_CROSSES_PER_IX) * TICK_SEARCH_RANGE,
       xToY ? 'down' : 'up'
     )
 
@@ -1378,15 +1655,23 @@ export class Market {
       pool.currentTickIndex,
       pool.tickSpacing,
       1,
-      Infinity,
+      TICK_SEARCH_RANGE / 2,
       xToY ? 'up' : 'down'
     )
 
-    return indexesInDirection.concat(indexesInReverse).map(index => {
-      const { tickAddress } = this.getTickAddress(pair, index)
-      return tickAddress
-    })
+    return indexesInDirection.concat(indexesInReverse)
   }
+  findTickAddressesForSwap(
+    pair: Pair,
+    pool: PoolStructure,
+    tickmap: Tickmap,
+    xToY: boolean,
+    tickCrosses: number
+  ) {
+    const tickIndexes = this.findTickIndexesForSwap(pool, tickmap, xToY, tickCrosses)
+    return tickIndexes.map(i => this.getTickAddress(pair, i).tickAddress)
+  }
+
   async swapIx(
     swap: Swap,
     cache: SwapCache = {},
@@ -1468,6 +1753,48 @@ export class Market {
     const setCuIx = computeUnitsInstruction(1_400_000, swap.owner ?? this.wallet.publicKey)
     const swapIx = await this.swapIx(swap, cache, ticks)
     return new Transaction().add(setCuIx).add(swapIx)
+  }
+
+  async versionedSwapTx(
+    swap: Swap,
+    cache: SwapCache & { blockhash?: string } = {},
+    ticks: TickIndexesOrCrosses = { tickCrosses: TICK_CROSSES_PER_IX },
+    prependedIxs: TransactionInstruction[] = [],
+    appendedIxs: TransactionInstruction[] = [],
+    tableLookups?: AddressLookupTableAccount[]
+  ) {
+    const swapPair = swap.pair
+    const [swapPool, prefetchedTickmap, fetchedBlockHash] = await Promise.all([
+      cache?.pool ?? this.getPool(swapPair),
+      cache?.pool?.tickmap ?? cache?.pool ? this.getTickmap(swapPair, cache?.pool) : undefined,
+      cache.blockhash ?? this.connection.getLatestBlockhash().then(h => h.blockhash)
+    ])
+    cache.pool = swapPool
+
+    const swapTickmap = prefetchedTickmap ?? (await this.getTickmap(swapPair, swapPool))
+    cache.tickmap = swapTickmap
+
+    let tickIndexes: number[] = []
+    if (ticks.tickIndexes) {
+      tickIndexes = ticks.tickIndexes
+    } else {
+      tickIndexes = this.findTickIndexesForSwap(swapPool, swapTickmap, swap.xToY, ticks.tickCrosses)
+    }
+
+    const lookups = tableLookups ?? getLookupTableAddresses(this, swapPair, tickIndexes)
+    const tickAddresses = tickIndexes.map(index => this.getTickAddress(swapPair, index).tickAddress)
+
+    const swapTx = await this.swapTx(swap, cache, {
+      tickAddresses: tickAddresses
+    })
+
+    const messageV0 = new web3.TransactionMessage({
+      payerKey: swap.owner ?? this.wallet.publicKey,
+      recentBlockhash: fetchedBlockHash,
+      instructions: [...prependedIxs, ...swapTx.instructions, ...appendedIxs]
+    }).compileToV0Message(lookups)
+
+    return new web3.VersionedTransaction(messageV0)
   }
 
   async swap(
@@ -2655,9 +2982,39 @@ type TickAddresses = {
   tickCrosses?: never
 }
 
+type TickIndexes = {
+  tickIndexes: number[]
+  tickCrosses?: never
+}
+
 type TickCrosses = {
   tickCrosses: number
   tickAddresses?: never
+  tickIndexes?: never
 }
 
 type Ticks = NonNullable<TickAddresses | TickCrosses>
+type TickIndexesOrCrosses = NonNullable<TickIndexes | TickCrosses>
+
+export type SwapAndCreatePosition = Omit<CreatePosition, 'pair' | 'knownPrice'> &
+  Pick<Swap, 'amount' | 'byAmountIn' | 'estimatedPriceAfterSwap' | 'xToY' | 'referralAccount'> & {
+    swapPair: Pair
+    minUtilizationPercentage: BN
+    amountX: BN
+    amountY: BN
+    swapAndCreateOnDifferentPools?: {
+      positionPair: Pair
+      positionPoolPrice: BN
+      positionSlippage: BN
+    }
+  }
+
+export type SwapAndCreatePositionInstructionCache = {
+  position?: CreatePositionInstructionCache
+  swap?: Omit<SwapCache, 'tokenXProgram' | 'tokenYProgram'>
+}
+
+export type SwapAndCreatePositionTransactionCache = {
+  position?: CreatePositionTransactionCache
+  swap?: Omit<SwapCache, 'tokenXProgram' | 'tokenYProgram'>
+}
