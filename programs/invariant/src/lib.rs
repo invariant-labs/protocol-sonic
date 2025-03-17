@@ -20,7 +20,7 @@ use math::*;
 use structs::{Pool, State};
 use util::*;
 
-declare_id!("8HJq6TfDVvZQJWu2RzjvV9W1yNkJNCng2iYQWCxkp7bL");
+declare_id!("iNvTyprs4TX8m6UeUEkeqDFjAL9zRCRWcexK9Sd4WEU");
 const SEED: &str = "Invariant";
 
 #[program]

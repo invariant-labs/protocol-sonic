@@ -1902,8 +1902,5 @@
       "name": "UnsupportedExtension",
       "msg": "Not supported Token2022 extension for mint account"
     }
-  ],
-  "metadata": {
-    "address": "8HJq6TfDVvZQJWu2RzjvV9W1yNkJNCng2iYQWCxkp7bL"
-  }
+  ]
 }

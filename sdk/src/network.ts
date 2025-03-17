@@ -8,7 +8,7 @@ export enum Network {
 export const getMarketAddress = (network: Network) => {
   switch (network) {
     case Network.LOCAL:
-      return '8HJq6TfDVvZQJWu2RzjvV9W1yNkJNCng2iYQWCxkp7bL'
+      return 'iNvTyprs4TX8m6UeUEkeqDFjAL9zRCRWcexK9Sd4WEU'
     case Network.DEV:
       return '8HJq6TfDVvZQJWu2RzjvV9W1yNkJNCng2iYQWCxkp7bL'
     case Network.TEST:
